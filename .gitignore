@@ -1,0 +1,11 @@
+cookies.json
+leads.db
+*.log
+__pycache__/
+*.pyc
+.venv/
+.env
+*.db-wal
+*.db-shm
+/tmp/
+scraper_*.log
