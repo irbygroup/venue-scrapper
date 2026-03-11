@@ -73,7 +73,7 @@ class BrowserManager:
 
     async def start(self):
         self.pw      = await async_playwright().start()
-        self.browser = await self.pw.chromium.launch(headless=True)
+        self.browser = await self.pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
         self.context = await self.browser.new_context(**BROWSER_OPTS)
         await self.context.add_init_script(INIT_SCRIPT)
 
@@ -137,7 +137,13 @@ class BrowserManager:
     async def do_login(self, email: str, password: str) -> bool:
         page = self.sync_page
         await page.goto(SIGNIN_URL, wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(0.8, 1.5))
+        await asyncio.sleep(1)
+
+        # If already redirected to dashboard (valid session), we're done
+        if "myeventective" in page.url:
+            await self.save_cookies()
+            return True
+
         await page.locator("#Email").fill(email)
         await asyncio.sleep(random.uniform(0.3, 0.6))
         await page.locator("#Password").fill(password)
