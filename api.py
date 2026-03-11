@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, APIRouter
 from pydantic import BaseModel
 from playwright.async_api import async_playwright, Page, BrowserContext
 
