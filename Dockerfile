@@ -12,6 +12,4 @@ RUN playwright install chromium
 # Copy app
 COPY api.py scrape_leads.py ./
 
-EXPOSE 5050
-
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "5050", "--log-level", "info"]
+CMD ["uvicorn", "api:app", "--host", "127.0.0.1", "--port", "5050", "--log-level", "info"]
