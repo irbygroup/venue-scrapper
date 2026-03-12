@@ -207,3 +207,42 @@ Dashboard overview with action items, watched leads, upcoming events, and 30-day
   }
 }
 ```
+
+## Email & Notifications
+
+### `POST /eventective/notify_error`
+
+Send an error notification email via SendGrid.
+
+**Query params:**
+- `subject` (string) — Error subject line
+- `detail` (string) — Error detail/stacktrace
+
+**Response:**
+```json
+{"status_code": 202, "success": true}
+```
+
+### `GET /eventective/daily_report`
+
+Generate and email a daily summary of all Eventective activity in the last 24 hours. Runs automatically via cron at 7 AM Central (12:00 UTC).
+
+**Response:**
+```json
+{
+  "report_sent": true,
+  "email_result": {"status_code": 202, "success": true},
+  "summary": {
+    "new_leads": 1,
+    "active_leads": 3,
+    "our_replies_24h": 5,
+    "their_replies_24h": 2,
+    "total_activities_24h": 15
+  }
+}
+```
+
+The email includes:
+- Summary stats table (new leads, active leads, our/their replies, total activities)
+- New lead cards with contact info, event details, and notes
+- Activity log grouped by lead with message text

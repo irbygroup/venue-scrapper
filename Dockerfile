@@ -9,7 +9,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Chromium browser binaries
 RUN playwright install chromium
 
-# Copy app
-COPY api.py scrape_leads.py ./
+# Install cron
+RUN apt-get update && apt-get install -y cron && rm -rf /var/lib/apt/lists/*
 
-CMD ["uvicorn", "api:app", "--host", "127.0.0.1", "--port", "5050", "--log-level", "info"]
+# Copy app
+COPY api.py scrape_leads.py entrypoint.sh ./
+RUN chmod +x entrypoint.sh
+
+# Daily report cron — 7 AM Central (12:00 UTC)
+RUN echo '0 12 * * * curl -s http://localhost:5050/eventective/daily_report >> /var/log/cron.log 2>&1' > /etc/cron.d/daily-report \
+    && chmod 0644 /etc/cron.d/daily-report \
+    && crontab /etc/cron.d/daily-report
+
+CMD ["./entrypoint.sh"]
