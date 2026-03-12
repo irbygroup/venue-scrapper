@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import traceback
+from base64 import b64encode
 
+import httpx
 from fastapi import FastAPI, HTTPException, BackgroundTasks, APIRouter
 from pydantic import BaseModel
 from playwright.async_api import async_playwright, Page, BrowserContext
@@ -163,6 +165,8 @@ class BrowserManager:
         ok = await self.do_login(email(), password())
         if ok:
             print("Auto-login successful.")
+        else:
+            notify_error("Auto-login failed", "Session expired and automatic re-login failed. Manual intervention may be required.")
         return ok
 
     async def do_login(self, email: str, password: str) -> bool:
@@ -625,7 +629,7 @@ async def run_sync(limit: Optional[int] = None) -> dict:
     """
     started_at = datetime.now(timezone.utc)
 
-    # Ensure we have a valid session
+    # Ensure we have a valid session (ensure_session sends error email if login fails)
     if not await bm.ensure_session():
         return {"error": "login_failed", "message": "Could not authenticate with Eventective"}
 
@@ -793,6 +797,7 @@ async def auth_login(req: LoginRequest = LoginRequest()):
     _password = req.password or password()
     ok = await bm.do_login(_email, _password)
     if not ok:
+        notify_error("Login failed", f"Manual login attempt failed for {_email}")
         raise HTTPException(status_code=401, detail="Login failed")
     # Navigate sync_page back to inbox
     await bm.sync_page.goto(inbox_url(), wait_until="domcontentloaded")
@@ -964,6 +969,7 @@ async def send_reply(event_id: str, req: ReplyRequest):
         try:
             await textarea.wait_for(state="visible", timeout=10000)
         except Exception:
+            notify_error("Reply failed — no reply box", f"Could not find reply textarea for lead {event_id}. Lead may be closed.")
             raise HTTPException(status_code=404, detail="Reply box not found — lead may be closed")
 
         await textarea.click()
@@ -986,6 +992,7 @@ async def send_reply(event_id: str, req: ReplyRequest):
         """)
 
         if sent != 'clicked':
+            notify_error("Reply failed — send button", f"Send button not found for lead {event_id}: {sent}")
             raise HTTPException(status_code=500, detail=f"Send button not found: {sent}")
 
         await asyncio.sleep(2)
@@ -1357,6 +1364,357 @@ async def daily_report():
             "their_replies_24h": their_replies,
             "total_activities_24h": len(recent_activities),
         }
+    }
+
+
+# ── FUB Sync ─────────────────────────────────────────────────────────────────
+
+ACTIVITY_LABELS = {
+    "LeadReceived": "Lead received",
+    "LeadPurchased": "Lead purchased",
+    "ReferralReceived": "Referral received",
+    "ReferralViewed": "Referral viewed",
+    "ReadMsgs": "Read our reply",
+    "EmailViewed": "Email address viewed",
+    "PhoneViewed": "Phone number viewed",
+    "DetClick": "Viewed Eventective listing",
+    "UrlClick": "Clicked URL",
+    "PPhoneClic": "Clicked to call",
+    "PEmailClic": "Clicked to email",
+    "PStatArchi": "Moved to Archived",
+    "PStatLost": "Moved to Lost",
+    "PStatQual": "Moved to Qualified",
+    "PStatBook": "Moved to Booked",
+    "pStatTent": "Moved to Tentative",
+    "NoInterest": "Marked no interest",
+    "PAddNote": "Note added",
+    "AttendChg": "Attendee count changed",
+    "NameChg": "Event name changed",
+    "TimeChg": "Start time changed",
+    "DuratChg": "Duration changed",
+    "DateChg": "Date changed",
+    "FlexOnChg": "Flexibility turned on",
+    "FlexOffChg": "Flexibility turned off",
+}
+
+fub_sync_state = {"running": False, "progress": {}, "errors": []}
+
+
+def _fub_headers():
+    api_key = _cfg("fub_api_key")
+    token = b64encode(f"{api_key}:".encode()).decode()
+    return {
+        "Authorization": f"Basic {token}",
+        "Content-Type": "application/json",
+        "X-System": _cfg("fub_system_header", "IRBY-GROUP-FUB-API"),
+        "X-System-Key": _cfg("fub_system_key"),
+    }
+
+
+async def _fub_request(client: httpx.AsyncClient, method: str, url: str, **kwargs):
+    """Make a FUB API request with automatic 429 retry."""
+    kwargs["headers"] = _fub_headers()
+    for attempt in range(5):
+        resp = await client.request(method, url, **kwargs)
+        if resp.status_code == 429:
+            retry_after = float(resp.headers.get("Retry-After", "2"))
+            print(f"[fub-sync] rate limited, waiting {retry_after}s (attempt {attempt+1})")
+            await asyncio.sleep(retry_after)
+            continue
+        resp.raise_for_status()
+        return resp
+    resp.raise_for_status()
+    return resp
+
+
+def _parse_name(full_name: str):
+    parts = full_name.strip().split(None, 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return parts[0] if parts else "", ""
+
+
+async def _fub_search_person(client: httpx.AsyncClient, phone: str, email: str):
+    """Search FUB for existing person by phone first, then email."""
+    base = _cfg("fub_api_base_url", "https://api.followupboss.com/v1")
+
+    if phone:
+        resp = await _fub_request(client, "GET", f"{base}/people", params={"phone": phone, "limit": 1})
+        people = resp.json().get("people", [])
+        if people:
+            return people[0]["id"]
+
+    if email:
+        resp = await _fub_request(client, "GET", f"{base}/people", params={"email": email, "limit": 1})
+        people = resp.json().get("people", [])
+        if people:
+            return people[0]["id"]
+
+    return None
+
+
+def _fub_stage(lead: dict, mode: str) -> str:
+    if mode == "incremental":
+        return "YH | Hot Lead"
+    try:
+        sent = datetime.fromisoformat(lead["EmailSentDttm"].replace("Z", "+00:00"))
+        age_days = (datetime.now(timezone.utc) - sent).days
+        return "YH | Hot Lead" if age_days <= 14 else "YH | Long Term Nurture"
+    except Exception:
+        return "YH | Long Term Nurture"
+
+
+async def _fub_create_event(client: httpx.AsyncClient, lead: dict, fub_person_id, mode: str):
+    """POST /v1/events to create or update person + register the inquiry."""
+    base = _cfg("fub_api_base_url", "https://api.followupboss.com/v1")
+
+    first, last = _parse_name(lead["RequestorName"] or "")
+    stage = _fub_stage(lead, mode)
+
+    person = {
+        "firstName": first,
+        "lastName": last,
+        "emails": [{"value": lead["RequestorEmailAddress"]}] if lead.get("RequestorEmailAddress") else [],
+        "phones": [{"value": lead["RequestorPhone"]}] if lead.get("RequestorPhone") else [],
+        "tags": ["Eventective"],
+        "stage": stage,
+        "customPrimaryVenueInterest": lead.get("ProviderName", ""),
+    }
+    if fub_person_id:
+        person["id"] = fub_person_id
+
+    event_id = lead["EventId"]
+    body = {
+        "source": "Eventective.com",
+        "system": _cfg("fub_system_header", "IRBY-GROUP-FUB-API"),
+        "type": "Inquiry",
+        "message": lead.get("InformationRequested") or "",
+        "contacted": False,
+        "sourceUrl": f"https://www.eventective.com/myeventective/#/crm/Event/Messages/{event_id}",
+        "campaign": {"source": "Eventective.com"},
+        "person": person,
+    }
+
+    # Only set occurredAt for existing people — for new people with historical
+    # dates, FUB returns 204 and silently discards the event without creating anyone
+    if fub_person_id:
+        body["occurredAt"] = lead.get("EmailSentDttm") or ""
+
+    resp = await _fub_request(client, "POST", f"{base}/events", json=body)
+
+    # 200/201 return person JSON; 204 = historical event (no body)
+    person_id = None
+    if resp.status_code in (200, 201):
+        result = resp.json()
+        person_id = result.get("id") or result.get("person", {}).get("id")
+
+    # If 204 or no ID, search for the person we just created/updated
+    if not person_id:
+        person_id = await _fub_search_person(client, lead.get("RequestorPhone") or "", lead.get("RequestorEmailAddress") or "")
+
+    if not person_id:
+        raise ValueError(f"Could not resolve FUB person after events POST for {event_id}")
+
+    # PUT /v1/people to ensure name, stage, contacted are set
+    # (events POST doesn't override these for existing people)
+    update_body = {
+        "firstName": first,
+        "lastName": last,
+        "stage": stage,
+        "contacted": False,
+        "customPrimaryVenueInterest": lead.get("ProviderName", ""),
+    }
+    try:
+        await _fub_request(client, "PUT", f"{base}/people/{person_id}", json=update_body)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            # Ghost person from a prior failed historical event — create via POST /people
+            print(f"[fub-sync] person {person_id} is a ghost (404 on PUT), creating via /people for {event_id}")
+            create_body = {
+                "firstName": first,
+                "lastName": last,
+                "emails": [{"value": lead["RequestorEmailAddress"]}] if lead.get("RequestorEmailAddress") else [],
+                "phones": [{"value": lead["RequestorPhone"]}] if lead.get("RequestorPhone") else [],
+                "tags": ["Eventective"],
+                "stage": stage,
+                "source": "Eventective.com",
+                "contacted": False,
+                "customPrimaryVenueInterest": lead.get("ProviderName", ""),
+            }
+            resp2 = await _fub_request(client, "POST", f"{base}/people", json=create_body)
+            result2 = resp2.json()
+            person_id = result2["id"]
+        else:
+            raise
+
+    return person_id
+
+
+async def _fub_create_note(client: httpx.AsyncClient, person_id: int, body_text: str, subject: str = ""):
+    """POST /v1/notes"""
+    base = _cfg("fub_api_base_url", "https://api.followupboss.com/v1")
+
+    payload = {
+        "personId": person_id,
+        "body": body_text,
+    }
+    if subject:
+        payload["subject"] = subject
+
+    resp = await _fub_request(client, "POST", f"{base}/notes", json=payload)
+    return resp.json()
+
+
+async def _fub_export_lead(client: httpx.AsyncClient, lead: dict, mode: str):
+    """Export a single Eventective lead + activities to FUB."""
+    event_id = lead["EventId"]
+    phone = lead.get("RequestorPhone") or ""
+    email_addr = lead.get("RequestorEmailAddress") or ""
+
+    # Step 1: search for existing person
+    fub_person_id = await _fub_search_person(client, phone, email_addr)
+
+    # Step 2: create/update via events POST
+    fub_person_id = await _fub_create_event(client, lead, fub_person_id, mode)
+
+    if not fub_person_id:
+        raise ValueError(f"No person ID returned from FUB for {event_id}")
+
+    # Step 3: lead details note
+    details_parts = [f"[Eventective Lead Details]"]
+    field_map = [
+        ("Venue", "ProviderName"), ("Event", "EventName"), ("Type", "EventType"),
+        ("Date", "EventDate"), ("Attendees", "AttendeeCount"), ("Budget", "BudgetValue"),
+        ("Duration", "Duration"), ("Location", "DirectLeadLocation"),
+        ("Info Requested", "InformationRequested"), ("Services", "ServicesRequested"),
+        ("Contact Pref", "RequestorContactPref"), ("Lead Status", "LeadStatus"),
+    ]
+    for label, key in field_map:
+        val = lead.get(key)
+        if val is not None and val != "":
+            details_parts.append(f"{label}: {val}")
+
+    food_parts = []
+    if lead.get("VenueProvidesFood"): food_parts.append("Venue")
+    if lead.get("CatererProvidesFood"): food_parts.append("Caterer")
+    if lead.get("SelfProvidesFood"): food_parts.append("Self")
+    if food_parts:
+        details_parts.append(f"Food provided by: {', '.join(food_parts)}")
+
+    details_parts.append(f"Eventective ID: {event_id}")
+    details_parts.append(f"Lead received: {lead.get('EmailSentDttm', 'N/A')}")
+    await _fub_create_note(client, fub_person_id, "\n".join(details_parts), subject="Eventective Lead Details")
+
+    # Step 4 & 5: activities
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    activities = con.execute(
+        "SELECT * FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime ASC",
+        (event_id,)
+    ).fetchall()
+    con.close()
+
+    messages = []
+    timeline_lines = []
+
+    for act in activities:
+        atype = act["ActivityTypeCd"]
+        dt_long = act["DateTimeLong"] or act["DateTime"] or ""
+        dt_iso = act["DateTime"] or ""
+
+        if atype in ("provplnr", "plnrprov"):
+            direction = "Outbound" if atype == "provplnr" else "Inbound"
+            sender = act["Sender"] or ""
+            recipient = act["Recipient"] or ""
+            text = act["ResponseText"] or ""
+            messages.append(f"[Eventective {direction}] {sender} → {recipient} ({dt_long}):\n{text}")
+        elif atype == "ResponseRank":
+            timeline_lines.append(f"{dt_long} - {act['ResponseText'] or 'Response ranked'}")
+        elif atype in ACTIVITY_LABELS:
+            timeline_lines.append(f"{dt_long} - {ACTIVITY_LABELS[atype]}")
+
+    # Create message notes
+    for note_body in messages:
+        await _fub_create_note(client, fub_person_id, note_body, subject="Eventective Message")
+
+    # Create timeline note
+    if timeline_lines:
+        timeline_body = f"[Eventective Timeline - {event_id}]\n" + "\n".join(timeline_lines)
+        await _fub_create_note(client, fub_person_id, timeline_body, subject="Eventective Timeline")
+
+    # Step 6: mark exported
+    now_str = datetime.now(timezone.utc).isoformat()
+    con = sqlite3.connect(DB_PATH)
+    con.execute(
+        "UPDATE eventective_leads SET fub_exported=1, fub_exported_date=?, fub_people_id=? WHERE EventId=?",
+        (now_str, str(fub_person_id), event_id)
+    )
+    con.execute(
+        "UPDATE eventective_lead_activities SET fub_exported=1, fub_exported_date=?, fub_people_id=? WHERE EventId=?",
+        (now_str, str(fub_person_id), event_id)
+    )
+    con.commit()
+    con.close()
+
+    return fub_person_id
+
+
+async def _fub_sync_task(mode: str, limit: int = 0):
+    """Background task: export unexported leads to FUB."""
+    fub_sync_state["running"] = True
+    fub_sync_state["errors"] = []
+    fub_sync_state["progress"] = {"exported": 0, "failed": 0, "total": 0, "current_event_id": None}
+
+    try:
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+        query = "SELECT * FROM eventective_leads WHERE fub_exported=0 ORDER BY EmailSentDttm ASC"
+        if limit > 0:
+            query += f" LIMIT {limit}"
+        leads = con.execute(query).fetchall()
+        con.close()
+
+        fub_sync_state["progress"]["total"] = len(leads)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for lead in leads:
+                eid = lead["EventId"]
+                fub_sync_state["progress"]["current_event_id"] = eid
+                try:
+                    pid = await _fub_export_lead(client, dict(lead), mode)
+                    fub_sync_state["progress"]["exported"] += 1
+                    print(f"[fub-sync] exported {eid} → FUB person {pid}")
+                except Exception as e:
+                    fub_sync_state["progress"]["failed"] += 1
+                    err_msg = f"{eid}: {e}"
+                    fub_sync_state["errors"].append(err_msg)
+                    print(f"[fub-sync] FAILED {err_msg}")
+                    traceback.print_exc()
+    finally:
+        fub_sync_state["running"] = False
+        fub_sync_state["progress"]["current_event_id"] = None
+        failed = fub_sync_state["progress"].get("failed", 0)
+        if failed > 0:
+            notify_error(
+                f"FUB sync completed with {failed} error(s)",
+                "\n".join(fub_sync_state["errors"][-20:])
+            )
+
+
+@router.post("/fub-sync")
+async def fub_sync(background_tasks: BackgroundTasks, mode: str = "backfill", limit: int = 0):
+    if fub_sync_state["running"]:
+        raise HTTPException(409, "FUB sync already running")
+    background_tasks.add_task(_fub_sync_task, mode, limit)
+    return {"status": "started", "mode": mode, "limit": limit or "unlimited"}
+
+
+@router.get("/fub-sync/status")
+async def fub_sync_status():
+    return {
+        "running": fub_sync_state["running"],
+        "progress": fub_sync_state["progress"],
+        "errors": fub_sync_state["errors"][-20:],
     }
 
 
