@@ -10,7 +10,6 @@ import random
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, APIRouter
@@ -19,13 +18,32 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-DB_PATH       = os.getenv("DB_PATH", "leads.db")
-COOKIES_PATH  = os.getenv("COOKIES_PATH", "cookies.json")
-EMAIL         = os.getenv("EVENTECTIVE_EMAIL", "info@rentyellowhammer.com")
-PASSWORD      = os.getenv("EVENTECTIVE_PASSWORD", "IrbyWins1!")
-INBOX_URL     = "https://www.eventective.com/myeventective/#/crm/Event/Inbox"
-SIGNIN_URL    = "https://www.eventective.com/signin"
-BATCH_SIZE    = 20
+DB_PATH = os.getenv("DB_PATH", "leads.db")
+
+
+def get_config(key: str, default: str = "") -> str:
+    """Read a config value from the config table, falling back to default."""
+    try:
+        con = sqlite3.connect(DB_PATH)
+        row = con.execute("SELECT value FROM config WHERE name=?", (key,)).fetchone()
+        con.close()
+        return row[0] if row else default
+    except Exception:
+        return default
+
+
+def _cfg(key: str, default: str = "") -> str:
+    """Lazy config accessor — used after init_db has run."""
+    return get_config(key, default)
+
+
+# These are read at request-time via _cfg() so DB changes take effect without restart
+def cookies_path(): return _cfg("eventective_cookies_path", "cookies.json")
+def email():        return _cfg("eventective_email", "info@rentyellowhammer.com")
+def password():     return _cfg("eventective_password", "IrbyWins1!")
+def inbox_url():    return _cfg("eventective_inbox_url", "https://www.eventective.com/myeventective/#/crm/Event/Inbox")
+def signin_url():   return _cfg("eventective_signin_url", "https://www.eventective.com/signin")
+def batch_size():   return int(_cfg("eventective_batch_size", "20"))
 
 BASE_BODY = {
     "SearchString": "",
@@ -77,21 +95,30 @@ class BrowserManager:
         self.context = await self.browser.new_context(**BROWSER_OPTS)
         await self.context.add_init_script(INIT_SCRIPT)
 
-        cookies_file = Path(COOKIES_PATH)
-        if cookies_file.exists():
-            cookies = json.loads(cookies_file.read_text())
-            await self.context.add_cookies(cookies)
+        # Load cookies from DB config table
+        cookie_json = get_config("eventective_cookies")
+        if cookie_json:
+            try:
+                await self.context.add_cookies(json.loads(cookie_json))
+            except Exception:
+                pass
 
         self.sync_page  = await self.context.new_page()
         self.reply_page = await self.context.new_page()
 
         # Land sync_page on inbox so session cookies are active
-        await self.sync_page.goto(INBOX_URL, wait_until="domcontentloaded")
+        await self.sync_page.goto(inbox_url(), wait_until="domcontentloaded")
         await self.sync_page.wait_for_load_state("networkidle", timeout=15000)
 
     async def save_cookies(self):
         cookies = await self.context.cookies()
-        Path(COOKIES_PATH).write_text(json.dumps(cookies, indent=2))
+        con = sqlite3.connect(DB_PATH)
+        con.execute(
+            "INSERT OR REPLACE INTO config (name, value) VALUES (?, ?)",
+            ("eventective_cookies", json.dumps(cookies))
+        )
+        con.commit()
+        con.close()
 
     async def close(self):
         if self.browser:
@@ -129,14 +156,14 @@ class BrowserManager:
         if await self.check_session():
             return True
         print("Session expired — auto-logging in...")
-        ok = await self.do_login(EMAIL, PASSWORD)
+        ok = await self.do_login(email(), password())
         if ok:
             print("Auto-login successful.")
         return ok
 
     async def do_login(self, email: str, password: str) -> bool:
         page = self.sync_page
-        await page.goto(SIGNIN_URL, wait_until="domcontentloaded")
+        await page.goto(signin_url(), wait_until="domcontentloaded")
         await asyncio.sleep(1)
 
         # If already redirected to dashboard (valid session), we're done
@@ -189,10 +216,104 @@ def get_db() -> sqlite3.Connection:
 def init_db():
     con = get_db()
     con.executescript("""
+        CREATE TABLE IF NOT EXISTS config (
+            name  TEXT PRIMARY KEY,
+            value TEXT
+        );
         CREATE TABLE IF NOT EXISTS sync_meta (
             key   TEXT PRIMARY KEY,
             value TEXT
         );
+        CREATE TABLE IF NOT EXISTS eventective_leads (
+            EventId                 TEXT PRIMARY KEY,
+            RequestGuid             TEXT,
+            RequestProviderNum      INTEGER,
+            ProviderNum             INTEGER,
+            ProviderName            TEXT,
+            EmailSentDttm           TEXT,
+            IsFlagged               INTEGER,
+            PurchasedLead           INTEGER,
+            DirectLead              INTEGER,
+            EventDate               TEXT,
+            AttendeeCount           INTEGER,
+            PlannerName             TEXT,
+            PlannerStatusCd         TEXT,
+            LastActivityDttm        TEXT,
+            LastActivity            TEXT,
+            LastActivityType        TEXT,
+            LastActivityIsAutoResponse INTEGER,
+            LastActivitySender      TEXT,
+            AvatarMediaNum          INTEGER,
+            IsRead                  INTEGER,
+            UnreadCount             INTEGER,
+            LeadStatus              TEXT,
+            IsAvailable             INTEGER,
+            DateAvailableType       TEXT,
+            EventType               TEXT,
+            EventNum                INTEGER,
+            GmtOffsetHours          REAL,
+            Source                  TEXT,
+            DetailScrapedAt         TEXT,
+            ProviderNameFull        TEXT,
+            ProviderEmailGeneric    TEXT,
+            RequestorName           TEXT,
+            RequestorEmailAddress   TEXT,
+            RequestorPhone          TEXT,
+            RequestorContactPref    TEXT,
+            EventName               TEXT,
+            DatePossible1           TEXT,
+            DateAvailable           INTEGER,
+            DateFlexible            INTEGER,
+            Duration                TEXT,
+            TimePossible1           TEXT,
+            BudgetValue             REAL,
+            DirectLeadLocation      TEXT,
+            InformationRequested    TEXT,
+            ServicesRequested       TEXT,
+            FoodRequired            INTEGER,
+            VenueProvidesFood       INTEGER,
+            CatererProvidesFood     INTEGER,
+            SelfProvidesFood        INTEGER,
+            IsEmailReguser          INTEGER,
+            PhoneViewed             INTEGER,
+            PhoneViewedDttm         TEXT,
+            EmailViewed             INTEGER,
+            EmailViewedDttm         TEXT,
+            ConfirmReceivedDttm     TEXT,
+            IsStripeEnabled         INTEGER,
+            IsSquareEnabled         INTEGER,
+            ScrapedAt               TEXT,
+            fub_exported            INTEGER DEFAULT 0,
+            fub_exported_date       TEXT,
+            fub_people_id           TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_el_lastactivity ON eventective_leads(LastActivityDttm);
+        CREATE INDEX IF NOT EXISTS idx_el_fub_exported ON eventective_leads(fub_exported);
+        CREATE TABLE IF NOT EXISTS eventective_lead_activities (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            EventId             TEXT NOT NULL,
+            DateTime            TEXT,
+            DateTimeLong        TEXT,
+            ActivityTypeCd      TEXT,
+            Sender              TEXT,
+            Recipient           TEXT,
+            ResponseText        TEXT,
+            IsRead              INTEGER,
+            ResponseNum         INTEGER,
+            HasAttachments      INTEGER,
+            IsAutoResponse      INTEGER,
+            EventDocumentNum    INTEGER,
+            EventPaymentNum     INTEGER,
+            PaymentAmount       REAL,
+            ReguserNum          INTEGER,
+            ActionNum           INTEGER,
+            fub_exported            INTEGER DEFAULT 0,
+            fub_exported_date       TEXT,
+            fub_people_id           TEXT,
+            UNIQUE(EventId, DateTime, ActivityTypeCd, ResponseNum)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ela_eventid ON eventective_lead_activities(EventId);
+        CREATE INDEX IF NOT EXISTS idx_ela_fub_exported ON eventective_lead_activities(fub_exported);
     """)
     con.commit()
     con.close()
@@ -214,7 +335,15 @@ def set_meta(key: str, value: str):
 
 def upsert_inbox_lead(con, lead: dict):
     con.execute("""
-        INSERT INTO leads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO eventective_leads (
+            EventId, RequestGuid, RequestProviderNum, ProviderNum, ProviderName,
+            EmailSentDttm, IsFlagged, PurchasedLead, DirectLead, EventDate,
+            AttendeeCount, PlannerName, PlannerStatusCd, LastActivityDttm,
+            LastActivity, LastActivityType, LastActivityIsAutoResponse,
+            LastActivitySender, AvatarMediaNum, IsRead, UnreadCount,
+            LeadStatus, IsAvailable, DateAvailableType, EventType,
+            EventNum, GmtOffsetHours, Source
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(EventId) DO UPDATE SET
             RequestGuid=excluded.RequestGuid, RequestProviderNum=excluded.RequestProviderNum,
             ProviderNum=excluded.ProviderNum, ProviderName=excluded.ProviderName,
@@ -241,35 +370,30 @@ def upsert_inbox_lead(con, lead: dict):
         lead.get("LastActivitySender"), lead.get("AvatarMediaNum"), lead.get("IsRead"),
         lead.get("UnreadCount"), lead.get("LeadStatus"), lead.get("IsAvailable"),
         lead.get("DateAvailableType"), lead.get("EventType"), lead.get("EventNum"),
-        lead.get("GmtOffsetHours"), lead.get("Source"), None,
+        lead.get("GmtOffsetHours"), lead.get("Source"),
     ))
 
 
 def upsert_lead_details(con, event_id: str, d: dict):
+    """Update the detail columns on the merged eventective_leads row."""
     con.execute("""
-        INSERT INTO lead_details VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(EventId) DO UPDATE SET
-            ProviderNum=excluded.ProviderNum, ProviderNameFull=excluded.ProviderNameFull,
-            ProviderEmailGeneric=excluded.ProviderEmailGeneric, RequestorName=excluded.RequestorName,
-            RequestorEmailAddress=excluded.RequestorEmailAddress, RequestorPhone=excluded.RequestorPhone,
-            RequestorContactPref=excluded.RequestorContactPref, EventName=excluded.EventName,
-            EventType=excluded.EventType, AttendeeCount=excluded.AttendeeCount,
-            DatePossible1=excluded.DatePossible1, DateAvailable=excluded.DateAvailable,
-            DateAvailableType=excluded.DateAvailableType, DateFlexible=excluded.DateFlexible,
-            Duration=excluded.Duration, TimePossible1=excluded.TimePossible1,
-            LeadStatus=excluded.LeadStatus, EmailSentDttm=excluded.EmailSentDttm,
-            DirectLead=excluded.DirectLead, PurchasedLead=excluded.PurchasedLead,
-            BudgetValue=excluded.BudgetValue, DirectLeadLocation=excluded.DirectLeadLocation,
-            InformationRequested=excluded.InformationRequested, ServicesRequested=excluded.ServicesRequested,
-            FoodRequired=excluded.FoodRequired, VenueProvidesFood=excluded.VenueProvidesFood,
-            CatererProvidesFood=excluded.CatererProvidesFood, SelfProvidesFood=excluded.SelfProvidesFood,
-            IsFlagged=excluded.IsFlagged, IsRead=excluded.IsRead, IsEmailReguser=excluded.IsEmailReguser,
-            PhoneViewed=excluded.PhoneViewed, PhoneViewedDttm=excluded.PhoneViewedDttm,
-            EmailViewed=excluded.EmailViewed, EmailViewedDttm=excluded.EmailViewedDttm,
-            ConfirmReceivedDttm=excluded.ConfirmReceivedDttm, IsStripeEnabled=excluded.IsStripeEnabled,
-            IsSquareEnabled=excluded.IsSquareEnabled, Source=excluded.Source, ScrapedAt=excluded.ScrapedAt
+        UPDATE eventective_leads SET
+            ProviderNum=?, ProviderNameFull=?, ProviderEmailGeneric=?,
+            RequestorName=?, RequestorEmailAddress=?, RequestorPhone=?,
+            RequestorContactPref=?, EventName=?, EventType=?,
+            AttendeeCount=?, DatePossible1=?, DateAvailable=?,
+            DateAvailableType=?, DateFlexible=?, Duration=?,
+            TimePossible1=?, LeadStatus=?, EmailSentDttm=?,
+            DirectLead=?, PurchasedLead=?, BudgetValue=?,
+            DirectLeadLocation=?, InformationRequested=?, ServicesRequested=?,
+            FoodRequired=?, VenueProvidesFood=?, CatererProvidesFood=?,
+            SelfProvidesFood=?, IsFlagged=?, IsRead=?, IsEmailReguser=?,
+            PhoneViewed=?, PhoneViewedDttm=?, EmailViewed=?, EmailViewedDttm=?,
+            ConfirmReceivedDttm=?, IsStripeEnabled=?, IsSquareEnabled=?,
+            Source=?, ScrapedAt=?
+        WHERE EventId=?
     """, (
-        event_id, d.get("ProviderNum"), d.get("ProviderNameFull"), d.get("ProviderEmailGeneric"),
+        d.get("ProviderNum"), d.get("ProviderNameFull"), d.get("ProviderEmailGeneric"),
         d.get("RequestorName"), d.get("RequestorEmailAddress"), d.get("RequestorPhone"),
         d.get("RequestorContactPref"), d.get("EventName"), d.get("EventType"),
         d.get("AttendeeCount"), d.get("DatePossible1"), d.get("DateAvailable"),
@@ -283,6 +407,7 @@ def upsert_lead_details(con, event_id: str, d: dict):
         d.get("EmailViewed"), d.get("EmailViewedDttm"), d.get("ConfirmReceivedDttm"),
         d.get("IsStripeEnabled"), d.get("IsSquareEnabled"), d.get("Source"),
         datetime.now(timezone.utc).isoformat(),
+        event_id,
     ))
 
 
@@ -291,7 +416,7 @@ def upsert_activities(con, event_id: str, activities: list) -> int:
     for a in activities:
         try:
             con.execute("""
-                INSERT OR IGNORE INTO activities
+                INSERT OR IGNORE INTO eventective_lead_activities
                 (EventId, DateTime, DateTimeLong, ActivityTypeCd, Sender, Recipient,
                  ResponseText, IsRead, ResponseNum, HasAttachments, IsAutoResponse,
                  EventDocumentNum, EventPaymentNum, PaymentAmount, ReguserNum, ActionNum)
@@ -473,7 +598,7 @@ def build_lead_detail(l_row, ld_row, activities: list) -> dict:
 def classify_change(event_id: str, signals: dict, con) -> str:
     """Classify what changed: new_lead | replied_to_us | read_no_reply | updated"""
     row = con.execute(
-        "SELECT DetailScrapedAt FROM leads WHERE EventId=?", (event_id,)
+        "SELECT DetailScrapedAt FROM eventective_leads WHERE EventId=?", (event_id,)
     ).fetchone()
     if not row or not row["DetailScrapedAt"]:
         return "new_lead"
@@ -502,7 +627,7 @@ async def run_sync(limit: Optional[int] = None) -> dict:
 
     # Make sure sync_page is on inbox
     if "myeventective" not in bm.sync_page.url:
-        await bm.sync_page.goto(INBOX_URL, wait_until="domcontentloaded")
+        await bm.sync_page.goto(inbox_url(), wait_until="domcontentloaded")
         await bm.sync_page.wait_for_load_state("networkidle", timeout=15000)
 
     last_sync = get_meta("last_sync_time") or "2020-01-01T00:00:00"
@@ -518,7 +643,7 @@ async def run_sync(limit: Optional[int] = None) -> dict:
         if limit and total_scanned >= limit:
             break
 
-        body = {**BASE_BODY, "StartIndex": api_start, "EndIndex": api_start + BATCH_SIZE - 1}
+        body = {**BASE_BODY, "StartIndex": api_start, "EndIndex": api_start + batch_size() - 1}
         batch = await bm.fetch(
             "/api/v1/salesandcatering/getmessagesforinbox?showFlagged=false&showUnread=false",
             method="POST", body=body
@@ -541,7 +666,7 @@ async def run_sync(limit: Optional[int] = None) -> dict:
 
             # Check against DB
             row = con.execute(
-                "SELECT LastActivityDttm, DetailScrapedAt FROM leads WHERE EventId=?",
+                "SELECT LastActivityDttm, DetailScrapedAt FROM eventective_leads WHERE EventId=?",
                 (lead["EventId"],)
             ).fetchone()
 
@@ -549,10 +674,10 @@ async def run_sync(limit: Optional[int] = None) -> dict:
                 needs_fetch.append(lead)
         else:
             # All leads in batch were fresh — continue if more pages
-            if len(batch) < BATCH_SIZE:
+            if len(batch) < batch_size():
                 stop_reason = "end_of_inbox"
                 break
-            api_start += BATCH_SIZE
+            api_start += batch_size()
             await asyncio.sleep(0.3)
             continue
         break  # broke out of inner loop (stale found or limit)
@@ -577,14 +702,14 @@ async def run_sync(limit: Optional[int] = None) -> dict:
         upsert_lead_details(con, event_id, detail)
         upsert_activities(con, event_id, detail.get("Activities") or [])
         con.execute(
-            "UPDATE leads SET DetailScrapedAt=? WHERE EventId=?",
+            "UPDATE eventective_leads SET DetailScrapedAt=? WHERE EventId=?",
             (datetime.now(timezone.utc).isoformat(), event_id)
         )
         con.commit()
 
         # Re-read fresh activities
         acts = [dict(r) for r in con.execute(
-            "SELECT * FROM activities WHERE EventId=? ORDER BY DateTime", (event_id,)
+            "SELECT * FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime", (event_id,)
         ).fetchall()]
         signals = classify_thread(acts)
         change  = classify_change(event_id, signals, con)
@@ -660,13 +785,13 @@ class ReplyRequest(BaseModel):
 
 @router.post("/auth/login")
 async def auth_login(req: LoginRequest = LoginRequest()):
-    email    = req.email    or EMAIL
-    password = req.password or PASSWORD
-    ok = await bm.do_login(email, password)
+    _email    = req.email    or email()
+    _password = req.password or password()
+    ok = await bm.do_login(_email, _password)
     if not ok:
         raise HTTPException(status_code=401, detail="Login failed")
     # Navigate sync_page back to inbox
-    await bm.sync_page.goto(INBOX_URL, wait_until="domcontentloaded")
+    await bm.sync_page.goto(inbox_url(), wait_until="domcontentloaded")
     await bm.sync_page.wait_for_load_state("networkidle", timeout=15000)
     return {"success": True, "message": "Logged in, cookies saved"}
 
@@ -674,15 +799,10 @@ async def auth_login(req: LoginRequest = LoginRequest()):
 @router.get("/auth/status")
 async def auth_status():
     valid = await bm.check_session()
-    cookies_age = None
-    cookies_file = Path(COOKIES_PATH)
-    if cookies_file.exists():
-        age_secs = (datetime.now(timezone.utc).timestamp() - cookies_file.stat().st_mtime)
-        cookies_age = round(age_secs / 86400, 1)
+    has_cookies = bool(get_config("eventective_cookies"))
     return {
-        "authenticated":   valid,
-        "cookies_age_days": cookies_age,
-        "cookies_path":    COOKIES_PATH,
+        "authenticated": valid,
+        "has_cookies":   has_cookies,
     }
 
 
@@ -717,15 +837,15 @@ async def list_leads(
         cutoff = datetime.fromtimestamp(
             datetime.now(timezone.utc).timestamp() - secs, tz=timezone.utc
         ).isoformat()
-        wheres.append("l.LastActivityDttm >= ?")
+        wheres.append("LastActivityDttm >= ?")
         params.append(cutoff)
 
     if venue:
-        wheres.append("LOWER(l.ProviderName) LIKE ?")
+        wheres.append("LOWER(ProviderName) LIKE ?")
         params.append(f"%{venue.lower()}%")
 
     if status:
-        wheres.append("LOWER(l.LeadStatus) = ?")
+        wheres.append("LOWER(LeadStatus) = ?")
         params.append(status.lower())
 
     if upcoming_days is not None:
@@ -733,21 +853,20 @@ async def list_leads(
         far_date    = datetime.fromtimestamp(
             datetime.now(timezone.utc).timestamp() + upcoming_days * 86400, tz=timezone.utc
         ).isoformat()
-        wheres.append("(ld.DatePossible1 >= ? AND ld.DatePossible1 <= ?)")
+        wheres.append("(DatePossible1 >= ? AND DatePossible1 <= ?)")
         params.extend([cutoff_date, far_date])
 
     where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
 
     rows = con.execute(f"""
-        SELECT l.EventId, l.PlannerName, l.LastActivityDttm, l.EventDate,
-               l.AttendeeCount, l.EventType, l.ProviderName, l.LeadStatus,
-               l.Source, l.EmailSentDttm,
-               ld.RequestorName, ld.RequestorPhone, ld.RequestorEmailAddress,
-               ld.BudgetValue, ld.InformationRequested, ld.DatePossible1, ld.DateFlexible
-        FROM leads l
-        LEFT JOIN lead_details ld ON ld.EventId = l.EventId
+        SELECT EventId, PlannerName, LastActivityDttm, EventDate,
+               AttendeeCount, EventType, ProviderName, LeadStatus,
+               Source, EmailSentDttm,
+               RequestorName, RequestorPhone, RequestorEmailAddress,
+               BudgetValue, InformationRequested, DatePossible1, DateFlexible
+        FROM eventective_leads
         {where_sql}
-        ORDER BY l.LastActivityDttm DESC
+        ORDER BY LastActivityDttm DESC
         LIMIT ? OFFSET ?
     """, params + [limit, offset]).fetchall()
 
@@ -758,7 +877,7 @@ async def list_leads(
 
         # Quick thread signals from DB
         acts = con.execute(
-            "SELECT ActivityTypeCd, DateTime, ResponseText, Sender FROM activities WHERE EventId=? ORDER BY DateTime",
+            "SELECT ActivityTypeCd, DateTime, ResponseText, Sender FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime",
             (r["EventId"],)
         ).fetchall()
         acts_dicts = [dict(a) for a in acts]
@@ -799,22 +918,19 @@ async def list_leads(
 async def get_lead(event_id: str):
     con = get_db()
 
-    l_row = con.execute(
-        "SELECT * FROM leads WHERE EventId=?", (event_id,)
+    row = con.execute(
+        "SELECT * FROM eventective_leads WHERE EventId=?", (event_id,)
     ).fetchone()
-    if not l_row:
+    if not row:
         raise HTTPException(status_code=404, detail=f"Lead {event_id} not found")
 
-    ld_row = con.execute(
-        "SELECT * FROM lead_details WHERE EventId=?", (event_id,)
-    ).fetchone()
-
     acts = [dict(a) for a in con.execute(
-        "SELECT * FROM activities WHERE EventId=? ORDER BY DateTime", (event_id,)
+        "SELECT * FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime", (event_id,)
     ).fetchall()]
 
     con.close()
-    return build_lead_detail(dict(l_row), dict(ld_row) if ld_row else None, acts)
+    row_dict = dict(row)
+    return build_lead_detail(row_dict, row_dict, acts)
 
 
 @router.post("/leads/{event_id}/reply")
@@ -831,7 +947,7 @@ async def send_reply(event_id: str, req: ReplyRequest):
         page = bm.reply_page
         # Ensure reply_page has visited the inbox first (cold page needs domain context)
         if "eventective.com" not in page.url:
-            await page.goto(INBOX_URL, wait_until="domcontentloaded")
+            await page.goto(inbox_url(), wait_until="domcontentloaded")
             await page.wait_for_load_state("networkidle", timeout=15000)
             await asyncio.sleep(1)
 
@@ -901,20 +1017,19 @@ async def status():
 
     # Recent leads (last 30 days)
     recent = con.execute("""
-        SELECT l.EventId, l.PlannerName, l.LastActivityDttm, l.EventDate,
-               l.AttendeeCount, l.EventType, l.ProviderName, l.LeadStatus, l.EmailSentDttm,
-               ld.RequestorName, ld.DatePossible1, ld.BudgetValue
-        FROM leads l
-        LEFT JOIN lead_details ld ON ld.EventId = l.EventId
-        WHERE l.LastActivityDttm >= ?
-        ORDER BY l.LastActivityDttm DESC
+        SELECT EventId, PlannerName, LastActivityDttm, EventDate,
+               AttendeeCount, EventType, ProviderName, LeadStatus, EmailSentDttm,
+               RequestorName, DatePossible1, BudgetValue
+        FROM eventective_leads
+        WHERE LastActivityDttm >= ?
+        ORDER BY LastActivityDttm DESC
     """, ((datetime.fromtimestamp(now.timestamp() - 30*86400, tz=timezone.utc)).isoformat(),)).fetchall()
 
     leads_30d = 0
     response_times = []
     first_responder_count = 0
 
-    all_leads = con.execute("SELECT COUNT(*) as c FROM leads").fetchone()["c"]
+    all_leads = con.execute("SELECT COUNT(*) as c FROM eventective_leads").fetchone()["c"]
 
     for r in recent:
         event_id   = r["EventId"]
@@ -922,7 +1037,7 @@ async def status():
         d_until    = days_until_event(event_date)
 
         acts = [dict(a) for a in con.execute(
-            "SELECT * FROM activities WHERE EventId=? ORDER BY DateTime", (event_id,)
+            "SELECT * FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime", (event_id,)
         ).fetchall()]
         signals = classify_thread(acts)
         urg, reasons = compute_urgency(d_until, signals["they_replied_to_us"], signals["hours_since_our_msg"])
@@ -984,9 +1099,6 @@ async def status():
     watching.sort(key=lambda x: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[x["urgency"]])
 
     session_valid = await bm.check_session()
-    cookies_age   = None
-    if Path(COOKIES_PATH).exists():
-        cookies_age = round((now.timestamp() - Path(COOKIES_PATH).stat().st_mtime) / 86400, 1)
 
     last_sync = get_meta("last_sync_time")
     avg_resp  = round(sum(response_times) / len(response_times), 0) if response_times else None
@@ -997,8 +1109,7 @@ async def status():
     return {
         "as_of": now.isoformat(),
         "session": {
-            "authenticated":    session_valid,
-            "cookies_age_days": cookies_age,
+            "authenticated": session_valid,
         },
         "last_sync": last_sync,
         "total_leads_in_db": all_leads,

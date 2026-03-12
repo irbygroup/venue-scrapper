@@ -35,8 +35,8 @@ sudo journalctl -u venue-scrapper -f
 # Container shell
 docker exec -it venue-scrapper bash
 
-# Re-copy leads.db or cookies.json from Mac
-scp leads.db cookies.json mind365:/opt/venue-scrapper/data/
+# Re-copy leads.db from Mac
+scp leads.db mind365:/opt/venue-scrapper/data/
 ```
 
 ## Architecture
@@ -47,7 +47,7 @@ A single `BrowserManager` instance lives for the lifetime of the process. It hol
 - `sync_page` — stays on the Eventective inbox, makes all JSON API calls via `page.evaluate(fetch(...))`
 - `reply_page` — navigates to individual lead message URLs to interact with the Angular reply UI
 
-All Playwright calls go through the same browser context (shared cookies, consistent TLS/fingerprint). On startup, cookies are loaded from `/data/cookies.json`; on login, new cookies are saved back.
+All Playwright calls go through the same browser context (shared cookies, consistent TLS/fingerprint). On startup, cookies are loaded from the `config` table in the database; on login, new cookies are saved back to the same table.
 
 **Chromium launch flags required for Docker:** `--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage`
 
@@ -65,15 +65,40 @@ Navigates `reply_page` to the lead's message URL, types character-by-character (
 
 ### Database
 
-SQLite at `leads.db` (local) or `/data/leads.db` (container). Three tables:
-- `leads` — inbox metadata, `LastActivityDttm`, `DetailScrapedAt`
-- `lead_details` — full contact/event info per lead
-- `activities` — full message thread for each lead
+SQLite at `leads.db` (local) or `/data/leads.db` (container). Tables:
+- `config` — key/value configuration (credentials, URLs, cookies, FUB keys)
+- `eventective_leads` — merged inbox metadata + full contact/event details per lead, with FUB tracking fields
+- `eventective_lead_activities` — full message thread for each lead, with FUB tracking fields
 - `sync_meta` — `last_sync_time` key/value
+
+All config (credentials, URLs, batch sizes) is stored in the `config` table and read at request-time — no env vars needed except `DB_PATH`.
+
+### FUB tracking fields
+
+Both `eventective_leads` and `eventective_lead_activities` have:
+- `fub_exported` (0/1) — whether the record has been exported to Follow Up Boss
+- `fub_exported_date` — when it was exported
+- `fub_people_id` — the FUB person ID it was linked to
+
+## API endpoints
+
+See **[API.md](API.md)** for full endpoint documentation with request/response examples.
+
+**IMPORTANT: Always update API.md when endpoints change.**
+
+## Schema management
+
+After any schema change, run:
+```bash
+./export_schema.sh leads.db
+```
+This exports the full schema + config seed rows (secrets purged) to `schema.sql`.
+
+**IMPORTANT: Always run `export_schema.sh` after any schema change.**
 
 ## Container
 
-Built from `mcr.microsoft.com/playwright/python:v1.50.0-noble`. Data volume at `/data` (leads.db + cookies.json). Env vars: `EVENTECTIVE_EMAIL`, `EVENTECTIVE_PASSWORD`, `DB_PATH`, `COOKIES_PATH`. Port `5050` bound to `127.0.0.1` only.
+Built from `mcr.microsoft.com/playwright/python:v1.50.0-noble`. Data volume at `/data` (leads.db). Only env var needed: `DB_PATH=/data/leads.db`. Port `5050` bound to `127.0.0.1` only.
 
 ## OpenClaw skill
 
