@@ -127,7 +127,17 @@ def _parse_llm_response(content: str) -> dict:
         content = "\n".join(lines).strip()
 
     try:
-        return json.loads(content)
+        parsed = json.loads(content)
+        # Guard against double-nested JSON — if proposed_reply is itself JSON, unwrap
+        reply = parsed.get("proposed_reply", "")
+        if isinstance(reply, str) and reply.startswith("{"):
+            try:
+                inner = json.loads(reply)
+                if "proposed_reply" in inner:
+                    parsed = inner
+            except json.JSONDecodeError:
+                pass
+        return parsed
     except json.JSONDecodeError:
         # Fallback: treat as plain text reply
         return {

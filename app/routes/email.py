@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
@@ -5,6 +6,20 @@ from psycopg2.extras import RealDictCursor
 
 from app.db import get_db, get_meta
 from app.email import send_email
+
+
+def _clean_drip_message(text: str) -> str:
+    """Extract the reply text from a drip message — handles raw JSON or clean text."""
+    if not text:
+        return ""
+    text = text.strip()
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            return parsed.get("proposed_reply", text)
+        except json.JSONDecodeError:
+            pass
+    return text
 
 router = APIRouter()
 
@@ -252,7 +267,7 @@ async def daily_report():
             name = dm["RequestorName"] or dm["PlannerName"]
             seq_label = seq_labels.get(dm["sequence"], dm["sequence"])
             step_label = step_labels.get((dm["sequence"], dm["step"]), f"Step {dm['step']}")
-            msg_preview = dm["message"]
+            msg_preview = _clean_drip_message(dm["message"])
             if len(msg_preview) > 300:
                 msg_preview = msg_preview[:300] + "..."
             time_str = (dm["sent_at"] or "").replace("T", " ").split(".")[0]
@@ -304,7 +319,7 @@ async def daily_report():
                 <span style="color:#666;"> &middot; {step_label}</span>
                 <span style="color:#999;font-size:12px;"> &middot; Lead {age} &middot; {status_badge}</span>
                 <div style="margin-top:6px;padding:8px;background:white;border-radius:3px;color:#333;font-size:14px;">
-                    {dm["message"]}
+                    {_clean_drip_message(dm["message"])}
                 </div>
             </div>
             """)
