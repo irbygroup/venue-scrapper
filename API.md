@@ -274,6 +274,42 @@ Manually trigger incremental FUB export — exports new leads (stage "YH | Hot L
 {"status": "started", "mode": "incremental"}
 ```
 
+### `POST /eventective/fub-webhook`
+
+Receive FUB webhook events. Also aliased at `POST /fub` for Cloudflare tunnel routing (`hooks.build365.app/fub`).
+
+**Query params:**
+- `token` (string, required) — must match `fub_webhook_token` in config table
+
+**Headers:**
+- `FUB-Signature` — HMAC-SHA256 signature from FUB
+
+Only `peopleStageUpdated` events are processed; all others return `{"status": "ignored"}`.
+
+**Response (updated):**
+```json
+{"status": "updated", "event_id": "...", "stage": "YH | Hot Lead"}
+```
+
+**Response (ignored):**
+```json
+{"status": "ignored", "event": "someOtherEvent"}
+```
+
+### `GET /eventective/fub-webhook/ensure`
+
+Ensure the FUB webhook is registered. Creates it if missing. Runs automatically via hourly cron.
+
+**Response (exists):**
+```json
+{"status": "exists", "webhook_id": 123}
+```
+
+**Response (created):**
+```json
+{"status": "created", "webhook_id": 456}
+```
+
 ### `GET /eventective/fub-sync/status`
 
 Check progress of all FUB export tasks.

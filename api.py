@@ -6,13 +6,13 @@ v3.0 — modular layout (see app/ package)
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Request
 
 from app import state as state_mod
 from app.browser import BrowserManager
 from app.db import init_db
 from app.email import notify_error
-from app.routes import auth, sync, leads, status, email, fub
+from app.routes import auth, sync, leads, status, email, fub, fub_webhook
 
 
 @asynccontextmanager
@@ -34,5 +34,11 @@ router.include_router(leads.router)
 router.include_router(status.router)
 router.include_router(email.router)
 router.include_router(fub.router)
+router.include_router(fub_webhook.router)
 
 app.include_router(router)
+
+
+@app.post("/fub")
+async def fub_webhook_root_alias(request: Request, token: str = ""):
+    return await fub_webhook.fub_webhook(request, token)

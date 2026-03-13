@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS eventective_leads (
     -- FUB tracking
     fub_exported            INTEGER DEFAULT 0,
     fub_exported_date       TEXT,
-    fub_people_id           TEXT
+    fub_people_id           TEXT,
+    fub_lead_stage          TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_el_lastactivity ON eventective_leads("LastActivityDttm");
@@ -115,3 +116,9 @@ CREATE TABLE IF NOT EXISTS eventective_lead_activities (
 
 CREATE INDEX IF NOT EXISTS idx_ela_eventid ON eventective_lead_activities("EventId");
 CREATE INDEX IF NOT EXISTS idx_ela_fub_exported ON eventective_lead_activities(fub_exported);
+
+-- Migrations (idempotent)
+DO $$ BEGIN
+    ALTER TABLE eventective_leads ADD COLUMN fub_lead_stage TEXT;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;

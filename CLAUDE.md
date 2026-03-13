@@ -4,10 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Eventective CRM lead management for Yellowhammer Hospitality (3 venues: The Hallet-Irby House, Oak & Fountain, The Courtyard on Dauphin). Two components:
+Eventective CRM lead management for Yellowhammer Hospitality (3 venues: The Hallet-Irby House, Oak & Fountain, The Courtyard on Dauphin).
 
-1. **`api.py` + `app/`** — FastAPI + async Playwright HTTP API (`localhost:5050`, all routes at `/eventective/*`)
-2. **`scrape_leads.py`** — CLI scraper (full/incremental modes), used manually for recovery only
+**`api.py` + `app/`** — FastAPI + async Playwright HTTP API (`localhost:5050`, all routes at `/eventective/*`)
 
 ## Running locally
 
@@ -18,9 +17,6 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 # Run the API (dev)
 .venv/bin/uvicorn api:app --port 5050 --log-level info
-
-# Run incremental sync (CLI scraper)
-PYTHONUNBUFFERED=1 .venv/bin/python scrape_leads.py incremental --db leads.db
 ```
 
 ## Production (vm-mind365)
@@ -64,6 +60,7 @@ app/
     status.py           # GET /status
     email.py            # POST /notify_error, GET /daily_report
     fub.py              # POST /fub-sync, POST /fub-export-new, GET /fub-sync/status
+    fub_webhook.py      # POST /fub-webhook, GET /fub-webhook/ensure (+ root /fub alias)
 ```
 
 **Dependency graph (no cycles):** `config` <- `db`, `email`, `browser`; `browser` <- `state`; `config`+`db`+`email` <- `fub`; `state`+`config`+`db`+`utils`+`fub` <- `sync`; routes import from all.
@@ -102,14 +99,15 @@ PostgreSQL 15 on vm-mind365 (database: `venue_scrapper`, role: `venue_scrapper`)
 
 All config (credentials, URLs, batch sizes) is stored in the `config` table and read at request-time. Only env var needed: `DATABASE_URL`.
 
-**Migration:** `migrate_to_pg.py` is the one-time SQLite→PG migration script. `schema_pg.sql` is the reference PostgreSQL DDL.
-
 ### FUB tracking fields
 
 Both `eventective_leads` and `eventective_lead_activities` have:
 - `fub_exported` (0/1) — whether the record has been exported to Follow Up Boss
 - `fub_exported_date` — when it was exported
 - `fub_people_id` — the FUB person ID it was linked to
+
+`eventective_leads` also has:
+- `fub_lead_stage` — current FUB stage, updated via webhook (`POST /fub-webhook`)
 
 ## API endpoints
 
@@ -119,10 +117,9 @@ See **[API.md](API.md)** for full endpoint documentation with request/response e
 
 ## Schema management
 
-SQLite schema (for reference/local dev): `schema.sql` — exported via `./export_schema.sh leads.db`
-PostgreSQL schema (production): `schema_pg.sql` — manually maintained DDL
+PostgreSQL schema: `schema_pg.sql` — manually maintained DDL, executed by `init_db()` on startup.
 
-**IMPORTANT: After any schema change, update both `schema.sql` (run `export_schema.sh`) and `schema_pg.sql`.**
+**IMPORTANT: After any schema change, update `schema_pg.sql` (add idempotent migration at bottom).**
 
 ## Container
 

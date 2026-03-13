@@ -147,6 +147,7 @@ def build_lead_detail(l_row, ld_row, activities: list) -> dict:
         "venue":          l_row["ProviderName"],
         "received_at":    l_row["EmailSentDttm"],
         "last_activity":  l_row["LastActivityDttm"],
+        "fub_lead_stage": l_row.get("fub_lead_stage"),
     }
 
     return {

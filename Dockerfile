@@ -13,13 +13,16 @@ RUN playwright install chromium
 RUN apt-get update && apt-get install -y cron && rm -rf /var/lib/apt/lists/*
 
 # Copy app
-COPY api.py scrape_leads.py schema_pg.sql entrypoint.sh ./
+COPY api.py schema_pg.sql entrypoint.sh ./
 COPY app/ app/
 RUN chmod +x entrypoint.sh
 
-# Daily report cron — 7 AM Central (12:00 UTC)
-RUN echo '0 12 * * * curl -s http://localhost:5050/eventective/daily_report >> /var/log/cron.log 2>&1' > /etc/cron.d/daily-report \
-    && chmod 0644 /etc/cron.d/daily-report \
-    && crontab /etc/cron.d/daily-report
+# Cron jobs
+RUN printf '%s\n' \
+    '0 12 * * * curl -s http://localhost:5050/eventective/daily_report >> /var/log/cron.log 2>&1' \
+    '15 * * * * curl -s http://localhost:5050/eventective/fub-webhook/ensure >> /var/log/cron.log 2>&1' \
+    > /etc/cron.d/venue-scrapper \
+    && chmod 0644 /etc/cron.d/venue-scrapper \
+    && crontab /etc/cron.d/venue-scrapper
 
 CMD ["./entrypoint.sh"]
