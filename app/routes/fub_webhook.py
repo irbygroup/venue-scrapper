@@ -110,7 +110,15 @@ async def fub_webhook_ensure():
 
         for wh in webhooks:
             if wh.get("url") == target_url:
-                return {"status": "exists", "webhook_id": wh.get("id")}
+                wh_id = wh.get("id")
+                if wh.get("status") != "Active":
+                    # Reactivate paused/disabled webhook
+                    await _fub_request(
+                        client, "PUT", f"{base}/webhooks/{wh_id}",
+                        json={"status": "Active"},
+                    )
+                    return {"status": "reactivated", "webhook_id": wh_id}
+                return {"status": "exists", "webhook_id": wh_id}
 
         # Create new webhook
         create_body = {
