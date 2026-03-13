@@ -507,10 +507,56 @@ async def process_due_campaigns() -> dict:
     return summary
 
 
+def _classify_lead_for_backfill(cur, event_id: str) -> str:
+    """
+    Determine the right sequence for an existing lead based on thread state.
+    Returns: 'new_lead' | 'unanswered_reply' | 'long_term_nurture'
+    """
+    cur.execute(
+        """SELECT count(*) as cnt FROM eventective_lead_activities
+           WHERE "EventId" = %s AND "ActivityTypeCd" = 'provplnr'""",
+        (event_id,),
+    )
+    our_count = cur.fetchone()["cnt"]
+
+    cur.execute(
+        """SELECT count(*) as cnt FROM eventective_lead_activities
+           WHERE "EventId" = %s AND "ActivityTypeCd" = 'plnrprov'""",
+        (event_id,),
+    )
+    their_count = cur.fetchone()["cnt"]
+
+    if our_count == 0:
+        # Never contacted — but if lead is old (>14d), go straight to Seq 3
+        cur.execute(
+            'SELECT "EmailSentDttm" FROM eventective_leads WHERE "EventId" = %s',
+            (event_id,),
+        )
+        row = cur.fetchone()
+        if row and row["EmailSentDttm"]:
+            from datetime import datetime, timezone
+            try:
+                sent = datetime.fromisoformat(row["EmailSentDttm"].replace("Z", "")).replace(tzinfo=timezone.utc)
+                age_days = (datetime.now(timezone.utc) - sent).days
+                if age_days <= 14:
+                    return "new_lead"
+            except Exception:
+                pass
+        return "long_term_nurture"
+
+    if their_count > 0:
+        # They replied — unanswered_reply follow-up
+        return "unanswered_reply"
+
+    # We replied, they didn't — long-term nurture
+    return "long_term_nurture"
+
+
 def backfill_seq3(cur, daily_remaining: int) -> int:
     """
-    Enroll eligible leads into Sequence 3 (long-term nurture).
-    Priority: never-contacted first, then newest-first among replied leads.
+    Enroll eligible leads into the appropriate drip sequence.
+    Classifies each lead based on thread state rather than dumping all into Seq 3.
+    Priority: never-contacted first, then newest-first.
     """
     if daily_remaining <= 0:
         return 0
@@ -542,23 +588,35 @@ def backfill_seq3(cur, daily_remaining: int) -> int:
         if cancel_reason:
             continue
 
-        if create_campaign(cur, event_id, "long_term_nurture"):
+        sequence = _classify_lead_for_backfill(cur, event_id)
+        if create_campaign(cur, event_id, sequence):
             created += 1
+            log.debug(f"Backfill: {event_id} → {sequence}")
 
     if created:
-        log.info(f"Backfilled {created} leads into long_term_nurture")
+        log.info(f"Backfilled {created} leads into drip campaigns")
     return created
 
 
 # ── Post-sync hooks (called from app/sync.py) ───────────────────────────────
 
 async def drip_post_sync_new_leads(event_ids: list[str]):
-    """Create Seq 1 campaigns + pre-generate all messages for new leads."""
+    """Create Seq 1 campaigns + pre-generate all messages for truly new leads only."""
     con = get_db()
     cur = con.cursor(cursor_factory=RealDictCursor)
 
     for event_id in event_ids:
         try:
+            # Guard: only enroll if we haven't already replied to this lead
+            cur.execute(
+                """SELECT count(*) as cnt FROM eventective_lead_activities
+                   WHERE "EventId" = %s AND "ActivityTypeCd" = 'provplnr'""",
+                (event_id,),
+            )
+            if cur.fetchone()["cnt"] > 0:
+                log.info(f"Skipping Seq 1 for {event_id}: we already replied")
+                continue
+
             if not create_campaign(cur, event_id, "new_lead", immediate=True):
                 continue
             con.commit()

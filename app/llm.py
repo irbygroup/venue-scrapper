@@ -59,8 +59,17 @@ def _build_user_context(lead_detail: dict, sequence: str, step: int) -> str:
             competitive_info = msg.get("text")
             break
 
+    # Put last messages front and center so the model sees them immediately
+    signals = lead_detail["thread_signals"]
+    last_exchange = {}
+    if signals.get("last_our_message"):
+        last_exchange["OUR_LAST_MESSAGE"] = signals["last_our_message"]
+    if signals.get("last_their_message"):
+        last_exchange["THEIR_LAST_MESSAGE"] = signals["last_their_message"]
+
     context = {
         "today": today,
+        "IMPORTANT_last_exchange": last_exchange,
         "lead": {
             "event_id": lead_detail["event_id"],
             "contact": lead_detail["contact"],
@@ -70,12 +79,10 @@ def _build_user_context(lead_detail: dict, sequence: str, step: int) -> str:
             "urgency_reasons": lead_detail["urgency_reasons"],
         },
         "thread_summary": {
-            "our_message_count": lead_detail["thread_signals"]["our_message_count"],
-            "their_message_count": lead_detail["thread_signals"]["their_message_count"],
-            "we_replied": lead_detail["thread_signals"]["we_replied"],
-            "they_replied_to_us": lead_detail["thread_signals"]["they_replied_to_us"],
-            "last_our_message": lead_detail["thread_signals"]["last_our_message"],
-            "last_their_message": lead_detail["thread_signals"]["last_their_message"],
+            "our_message_count": signals["our_message_count"],
+            "their_message_count": signals["their_message_count"],
+            "we_replied": signals["we_replied"],
+            "they_replied_to_us": signals["they_replied_to_us"],
         },
         "thread": [
             msg for msg in lead_detail["thread"]
