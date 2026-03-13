@@ -13,6 +13,7 @@ from psycopg2.extras import RealDictCursor
 
 from app.config import _cfg
 from app.db import get_db
+from app.email import notify_error
 from app.llm import generate_reply_for_lead, generate_all_seq1
 
 log = logging.getLogger("drip")
@@ -505,6 +506,15 @@ async def process_due_campaigns() -> dict:
         "auto_send": auto_send,
     }
     log.info(f"Drip process complete: {summary}")
+
+    # Send error email if there were failures
+    if send_result["failed"] > 0 or errors > 0:
+        notify_error(
+            "Drip process had failures",
+            f"Send failures: {send_result['failed']}, LLM errors: {errors}, "
+            f"Cancelled: {cancelled}, Total due: {len(due)}"
+        )
+
     return summary
 
 
