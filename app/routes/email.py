@@ -82,9 +82,23 @@ async def daily_report():
     """, (cutoff,))
     drip_sent = cur.fetchall()
 
-    # Drip pending review
-    cur.execute("SELECT count(*) as c FROM drip_messages WHERE result = 'pending_review'")
-    drip_pending = cur.fetchone()["c"]
+    # Drip pending review — full messages for the report
+    cur.execute("""
+        SELECT dm."EventId", dm.sequence, dm.step, dm.result, dm.message,
+               dm.created_at,
+               el."RequestorName", el."PlannerName", el."ProviderName", el."EventType",
+               el."EmailSentDttm"
+        FROM drip_messages dm
+        JOIN eventective_leads el ON el."EventId" = dm."EventId"
+        WHERE dm.result IN ('pending_review', 'scheduled')
+          AND dm.step = (
+              SELECT dc.current_step FROM drip_campaigns dc
+              WHERE dc."EventId" = dm."EventId" AND dc.status = 'active'
+          )
+        ORDER BY dm.sequence, dm.created_at
+    """)
+    drip_queued = cur.fetchall()
+    drip_pending = len([d for d in drip_queued if d["result"] == "pending_review"])
 
     # Drip campaign summary
     cur.execute("""
@@ -257,8 +271,44 @@ async def daily_report():
     else:
         html_parts.append('<p style="color:#999;">No auto-replies sent in the last 24 hours.</p>')
 
-    if drip_pending > 0:
-        html_parts.append(f'<p style="color:#e67e22;">⏳ <strong>{drip_pending}</strong> messages pending review.</p>')
+    # Queued messages — show what's next up to send
+    if drip_queued:
+        # Group by sequence for display, respect daily caps
+        # Daily caps for reference
+        html_parts.append(f'<h3 style="color:#e67e22;margin-top:16px;">⏳ Next Up ({len(drip_queued)} queued)</h3>')
+
+        shown = 0
+        for dm in drip_queued:
+            if shown >= 50:
+                html_parts.append(f'<p style="color:#999;">... and {len(drip_queued) - 50} more</p>')
+                break
+            name = dm["RequestorName"] or dm["PlannerName"]
+            seq_label = seq_labels.get(dm["sequence"], dm["sequence"])
+            step_label = step_labels.get((dm["sequence"], dm["step"]), f"Step {dm['step']}")
+            # Calculate lead age
+            age = ""
+            if dm["EmailSentDttm"]:
+                try:
+                    from datetime import datetime as dt2
+                    sent_dt = dt2.fromisoformat(dm["EmailSentDttm"].replace("Z", "")).replace(tzinfo=timezone.utc)
+                    days = (now - sent_dt).days
+                    age = f"{days}d old"
+                except Exception:
+                    pass
+            status_badge = "🟡 pending" if dm["result"] == "pending_review" else "🔵 scheduled"
+            html_parts.append(f"""
+            <div style="background:#fff8f0;border-left:4px solid #e67e22;padding:12px;margin:8px 0;border-radius:4px;">
+                <strong>{name}</strong> — {dm["ProviderName"]} &middot; {dm["EventType"] or "Event"}
+                <span style="color:#888;font-size:12px;">({dm["EventId"]})</span><br>
+                <span style="color:#e67e22;font-weight:bold;">{seq_label}</span>
+                <span style="color:#666;"> &middot; {step_label}</span>
+                <span style="color:#999;font-size:12px;"> &middot; Lead {age} &middot; {status_badge}</span>
+                <div style="margin-top:6px;padding:8px;background:white;border-radius:3px;color:#333;font-size:14px;">
+                    {dm["message"]}
+                </div>
+            </div>
+            """)
+            shown += 1
 
     # Drip campaign stats
     if drip_summary:
