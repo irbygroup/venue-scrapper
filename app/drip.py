@@ -117,10 +117,11 @@ def get_daily_send_counts(cur) -> dict:
 
 # ── Campaign CRUD ────────────────────────────────────────────────────────────
 
-def create_campaign(cur, event_id: str, sequence: str, immediate: bool = False):
+def create_campaign(cur, event_id: str, sequence: str, immediate: bool = False, start_step: int = 0):
     """
     Create a drip campaign. Skips if an active/paused campaign already exists.
     Overwrites completed/cancelled/transitioned campaigns.
+    start_step allows enrolling mid-sequence (e.g., lead is 2 days old, skip to step 2).
     """
     # Check for existing campaign
     cur.execute('SELECT status FROM drip_campaigns WHERE "EventId"=%s', (event_id,))
@@ -130,29 +131,30 @@ def create_campaign(cur, event_id: str, sequence: str, immediate: bool = False):
         return False
 
     steps = SEQUENCE_STEPS[sequence]
-    delay = steps[0] if not immediate else 0
+    if start_step >= len(steps):
+        start_step = 0
+    delay = steps[start_step] if not immediate else 0
     now = _now_iso()
 
     if existing:
-        # Overwrite completed/cancelled/transitioned
         cur.execute(
             """UPDATE drip_campaigns
-               SET sequence=%s, current_step=0, status='active',
+               SET sequence=%s, current_step=%s, status='active',
                    last_outbound_at=NULL, last_inbound_at=NULL,
                    next_scheduled_at=%s, cancel_reason=NULL,
                    created_at=%s, updated_at=%s
                WHERE "EventId"=%s""",
-            (sequence, _schedule_next(delay), now, now, event_id),
+            (sequence, start_step, _schedule_next(delay), now, now, event_id),
         )
     else:
         cur.execute(
             """INSERT INTO drip_campaigns
                ("EventId", sequence, current_step, status, next_scheduled_at, created_at, updated_at)
-               VALUES (%s, %s, 0, 'active', %s, %s, %s)""",
-            (event_id, sequence, _schedule_next(delay), now, now),
+               VALUES (%s, %s, %s, 'active', %s, %s, %s)""",
+            (event_id, sequence, start_step, _schedule_next(delay), now, now),
         )
 
-    log.info(f"Created campaign: {event_id} → {sequence} (immediate={immediate})")
+    log.info(f"Created campaign: {event_id} → {sequence} step {start_step} (immediate={immediate})")
     return True
 
 
@@ -518,10 +520,19 @@ async def process_due_campaigns() -> dict:
     return summary
 
 
-def _classify_lead_for_backfill(cur, event_id: str) -> str:
+def _classify_lead_for_backfill(cur, event_id: str) -> tuple[str, int]:
     """
-    Determine the right sequence for an existing lead based on thread state.
-    Returns: 'new_lead' | 'unanswered_reply' | 'long_term_nurture'
+    Determine the right sequence AND starting step for an existing lead.
+    Returns: (sequence, starting_step)
+
+    Logic:
+    - Never contacted, <=14d old → new_lead step 0
+    - Never contacted, >14d old → long_term_nurture step 0
+    - We replied, they didn't, <=1d ago → new_lead step 1 (+1d nudge)
+    - We replied, they didn't, 1-3d ago → new_lead step 2 (+3d value-add)
+    - We replied, they didn't, 3-7d ago → new_lead step 3 (+7d last push)
+    - We replied, they didn't, >7d ago → long_term_nurture step 0
+    - They replied to us → unanswered_reply step 0
     """
     cur.execute(
         """SELECT count(*) as cnt FROM eventective_lead_activities
@@ -537,30 +548,54 @@ def _classify_lead_for_backfill(cur, event_id: str) -> str:
     )
     their_count = cur.fetchone()["cnt"]
 
-    if our_count == 0:
-        # Never contacted — but if lead is old (>14d), go straight to Seq 3
-        cur.execute(
-            'SELECT "EmailSentDttm" FROM eventective_leads WHERE "EventId" = %s',
-            (event_id,),
-        )
-        row = cur.fetchone()
-        if row and row["EmailSentDttm"]:
-            from datetime import datetime, timezone
-            try:
-                sent = datetime.fromisoformat(row["EmailSentDttm"].replace("Z", "")).replace(tzinfo=timezone.utc)
-                age_days = (datetime.now(timezone.utc) - sent).days
-                if age_days <= 14:
-                    return "new_lead"
-            except Exception:
-                pass
-        return "long_term_nurture"
+    # Get lead age
+    cur.execute(
+        'SELECT "EmailSentDttm" FROM eventective_leads WHERE "EventId" = %s',
+        (event_id,),
+    )
+    row = cur.fetchone()
+    age_days = 999
+    if row and row["EmailSentDttm"]:
+        try:
+            sent = datetime.fromisoformat(row["EmailSentDttm"].replace("Z", "")).replace(tzinfo=timezone.utc)
+            age_days = (datetime.now(timezone.utc) - sent).days
+        except Exception:
+            pass
 
     if their_count > 0:
         # They replied — unanswered_reply follow-up
-        return "unanswered_reply"
+        return "unanswered_reply", 0
 
-    # We replied, they didn't — long-term nurture
-    return "long_term_nurture"
+    if our_count == 0:
+        # Never contacted
+        if age_days <= 14:
+            return "new_lead", 0
+        return "long_term_nurture", 0
+
+    # We replied, they didn't — pick step based on how recently
+    # Get days since our last reply
+    cur.execute(
+        """SELECT max("DateTime") as last_reply FROM eventective_lead_activities
+           WHERE "EventId" = %s AND "ActivityTypeCd" = 'provplnr'""",
+        (event_id,),
+    )
+    last_reply_row = cur.fetchone()
+    days_since_reply = 999
+    if last_reply_row and last_reply_row["last_reply"]:
+        try:
+            lr = datetime.fromisoformat(last_reply_row["last_reply"].replace("Z", "")).replace(tzinfo=timezone.utc)
+            days_since_reply = (datetime.now(timezone.utc) - lr).days
+        except Exception:
+            pass
+
+    if days_since_reply <= 1:
+        return "new_lead", 1   # +1d nudge
+    elif days_since_reply <= 3:
+        return "new_lead", 2   # +3d value-add
+    elif days_since_reply <= 7:
+        return "new_lead", 3   # +7d last push
+    else:
+        return "long_term_nurture", 0
 
 
 def backfill_seq3(cur, daily_remaining: int) -> int:
@@ -599,10 +634,10 @@ def backfill_seq3(cur, daily_remaining: int) -> int:
         if cancel_reason:
             continue
 
-        sequence = _classify_lead_for_backfill(cur, event_id)
-        if create_campaign(cur, event_id, sequence):
+        sequence, start_step = _classify_lead_for_backfill(cur, event_id)
+        if create_campaign(cur, event_id, sequence, start_step=start_step):
             created += 1
-            log.debug(f"Backfill: {event_id} → {sequence}")
+            log.debug(f"Backfill: {event_id} → {sequence} step {start_step}")
 
     if created:
         log.info(f"Backfilled {created} leads into drip campaigns")
