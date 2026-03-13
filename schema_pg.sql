@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS eventective_leads (
     "DateFlexible"            INTEGER,
     "Duration"                TEXT,
     "TimePossible1"           TEXT,
-    "BudgetValue"             DOUBLE PRECISION,
+    "BudgetValue"             TEXT,
     "DirectLeadLocation"      TEXT,
     "InformationRequested"    TEXT,
     "ServicesRequested"       TEXT,
