@@ -178,6 +178,11 @@ Before sending any drip message, checks `fub_lead_stage`:
 - `app/drip.py` — State machine, scheduler, batch sending, backfill
 - `app/routes/drip.py` — API endpoints (process, status, pause, resume, cancel, send)
 
-### Cron
+### Cron (all times Central, Mon-Sat only)
 
-`*/15 * * * *` — calls `POST /eventective/drip/process` to process due campaigns
+| Schedule | Endpoint | Purpose |
+|----------|----------|---------|
+| `:32` every 2h, 8am-6pm | `POST /sync` | Sync new leads from Eventective |
+| `:42` every 2h, 8am-6pm | `POST /drip/process` | Process due campaigns (10 min after sync) |
+| `7:00am` daily | `GET /daily_report` | Email daily summary |
+| `:15` every hour | `GET /fub-webhook/ensure` | Ensure FUB webhook exists |
