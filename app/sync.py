@@ -157,6 +157,20 @@ async def run_sync(limit: Optional[int] = None) -> dict:
     if needs_fetch:
         asyncio.create_task(_fub_incremental_export())
 
+    # Drip campaign hooks
+    try:
+        from app.drip import drip_post_sync_new_leads, drip_post_sync_replies
+        if results["new_leads"]:
+            asyncio.create_task(drip_post_sync_new_leads(
+                [e["event_id"] for e in results["new_leads"]]
+            ))
+        if results["replied_to_us"]:
+            asyncio.create_task(drip_post_sync_replies(
+                [e["event_id"] for e in results["replied_to_us"]]
+            ))
+    except Exception as e:
+        print(f"Drip post-sync hook error (non-fatal): {e}")
+
     duration = (datetime.now(timezone.utc) - started_at).total_seconds()
     return {
         "duration_seconds": round(duration, 1),

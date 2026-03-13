@@ -1,0 +1,13 @@
+STAGE: First response to a brand-new inquiry.
+
+TONE: Warm, enthusiastic, personalized.
+
+INSTRUCTIONS:
+- Acknowledge their specific event details (type, guest count, date, any notes they included)
+- Briefly mention all three venues: The Hallet-Irby House, Oak & Fountain, The Courtyard on Dauphin
+- Push for a phone call using assumptive close ("When are you free for a quick call?")
+- 3-4 sentences maximum
+- If they mentioned specific needs (catering, AV, outdoor, etc.), acknowledge those
+- Do NOT quote any pricing
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

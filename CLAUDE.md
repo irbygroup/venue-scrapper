@@ -135,3 +135,49 @@ Built from `mcr.microsoft.com/playwright/python:v1.50.0-noble`. Uses `DATABASE_U
 - Always mention all 3 venues regardless of which one they inquired about
 - Goal: get them on the phone with Veronica Miller at 251-422-9114
 - Use assumptive close ("When are you free?") not permission-seeking ("Would you like to call?")
+
+## Drip campaign system
+
+AI-powered automated follow-up sequences using LLM-generated messages (Gemini 2.5 Flash via LiteLLM proxy).
+
+### Three sequences
+
+| Sequence | Trigger | Steps | Timing |
+|----------|---------|-------|--------|
+| `new_lead` | New inquiry arrives | 4 | Immediate, +1d, +3d, +7d |
+| `unanswered_reply` | They replied, we replied, silence | 4 | +1d, +3d, +7d, +14d |
+| `long_term_nurture` | After Seq 1 or 2 completes | 6 | +30d, +60d, +120d, +180d, +180d, +180d |
+
+### Prompt files
+
+All LLM prompts live in `prompts/` as flat `.txt` files — edit without touching Python:
+- `prompts/system_base.txt` — base system prompt (sales rules, output format)
+- `prompts/{sequence}/step_{N}.txt` — stage-specific instructions
+
+### FUB stage gate
+
+Before sending any drip message, checks `fub_lead_stage`:
+- NULL, "YH | Hot Lead", "YH | Long Term Nurture" → OK to send
+- Anything else → skip (Veronica is managing in FUB)
+
+### Config keys
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `drip_auto_send` | `false` | Set to `true` to auto-send (otherwise messages go to `pending_review`) |
+| `drip_seq1_daily_cap` | `0` | Max daily sends for Seq 1 (0 = unlimited) |
+| `drip_seq2_daily_cap` | `25` | Max daily sends for Seq 2 |
+| `drip_seq3_daily_cap` | `25` | Max daily sends for Seq 3 |
+| `litellm_base_url` | `https://litellm.build365.app` | LiteLLM proxy URL |
+| `litellm_api_key` | — | LiteLLM API key |
+| `litellm_model` | `openrouter/google/gemini-2.5-flash` | Model to use |
+
+### Key modules
+
+- `app/llm.py` — LLM generation (loads flat-file prompts, structured JSON context)
+- `app/drip.py` — State machine, scheduler, batch sending, backfill
+- `app/routes/drip.py` — API endpoints (process, status, pause, resume, cancel, send)
+
+### Cron
+
+`*/15 * * * *` — calls `POST /eventective/drip/process` to process due campaigns

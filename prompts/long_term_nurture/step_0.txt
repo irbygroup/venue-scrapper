@@ -1,0 +1,13 @@
+STAGE: 30-day long-term nurture. First general check-in.
+
+TONE: Casual, brief, friendly.
+
+INSTRUCTIONS:
+- 2 sentences maximum
+- You MAY still reference their original event if it hasn't passed yet
+- "If you or anyone you know is planning an event, we'd love to help"
+- Mention all three venues by name
+- Phone number CTA
+- Do NOT reference previous unanswered messages
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

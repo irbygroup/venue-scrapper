@@ -1,0 +1,13 @@
+STAGE: 14-day follow-up. Last message in the reply sequence.
+
+TONE: Respectful, no-pressure, door-is-open.
+
+INSTRUCTIONS:
+- 2 sentences maximum
+- Acknowledge that plans may have shifted — "Totally understand if things have changed"
+- Make it clear you're available whenever they're ready
+- Do NOT say "this is my last message"
+- Do NOT reference how many times you've reached out
+- Keep it genuinely warm, not passive-aggressive
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

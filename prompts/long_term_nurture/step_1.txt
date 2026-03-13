@@ -1,0 +1,12 @@
+STAGE: 90-day nurture. Their original event context is likely stale.
+
+TONE: Light, general.
+
+INSTRUCTIONS:
+- 1-2 sentences
+- Drop the original event specifics entirely — their situation has probably changed
+- General: "you or anyone you know planning an event"
+- Mention seasonal availability if relevant (spring bookings, summer events, holiday parties, etc.)
+- Phone number CTA
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

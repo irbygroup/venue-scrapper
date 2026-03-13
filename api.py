@@ -12,7 +12,7 @@ from app import state as state_mod
 from app.browser import BrowserManager
 from app.db import init_db
 from app.email import notify_error
-from app.routes import auth, sync, leads, status, email, fub, fub_webhook
+from app.routes import auth, sync, leads, status, email, fub, fub_webhook, drip
 
 
 @asynccontextmanager
@@ -35,6 +35,7 @@ router.include_router(status.router)
 router.include_router(email.router)
 router.include_router(fub.router)
 router.include_router(fub_webhook.router)
+router.include_router(drip.router)
 
 app.include_router(router)
 

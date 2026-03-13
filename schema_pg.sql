@@ -117,6 +117,49 @@ CREATE TABLE IF NOT EXISTS eventective_lead_activities (
 CREATE INDEX IF NOT EXISTS idx_ela_eventid ON eventective_lead_activities("EventId");
 CREATE INDEX IF NOT EXISTS idx_ela_fub_exported ON eventective_lead_activities(fub_exported);
 
+-- Drip campaign state
+CREATE TABLE IF NOT EXISTS drip_campaigns (
+    "EventId"          TEXT PRIMARY KEY,
+    sequence           TEXT NOT NULL,
+    current_step       INTEGER NOT NULL DEFAULT 0,
+    status             TEXT NOT NULL DEFAULT 'active',
+    last_outbound_at   TEXT,
+    last_inbound_at    TEXT,
+    next_scheduled_at  TEXT,
+    cancel_reason      TEXT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dc_status_next ON drip_campaigns(status, next_scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_dc_sequence ON drip_campaigns(sequence);
+
+-- Drip message log
+CREATE TABLE IF NOT EXISTS drip_messages (
+    id                 SERIAL PRIMARY KEY,
+    "EventId"          TEXT NOT NULL,
+    sequence           TEXT NOT NULL,
+    step               INTEGER NOT NULL,
+    message            TEXT NOT NULL,
+    next_step          TEXT,
+    next_step_reason   TEXT,
+    tone_notes         TEXT,
+    model              TEXT,
+    sent_at            TEXT,
+    result             TEXT,
+    created_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dm_eventid ON drip_messages("EventId");
+CREATE INDEX IF NOT EXISTS idx_dm_result ON drip_messages(result);
+
+-- Drip config seeds
+INSERT INTO config (name, value) VALUES ('drip_auto_send', 'false') ON CONFLICT DO NOTHING;
+INSERT INTO config (name, value) VALUES ('drip_seq1_daily_cap', '0') ON CONFLICT DO NOTHING;
+INSERT INTO config (name, value) VALUES ('drip_seq2_daily_cap', '25') ON CONFLICT DO NOTHING;
+INSERT INTO config (name, value) VALUES ('drip_seq3_daily_cap', '25') ON CONFLICT DO NOTHING;
+INSERT INTO config (name, value) VALUES ('litellm_base_url', 'https://litellm.build365.app') ON CONFLICT DO NOTHING;
+INSERT INTO config (name, value) VALUES ('litellm_api_key', 'sk-W8WhFDtFrC8aqjZw7_Cxdg') ON CONFLICT DO NOTHING;
+INSERT INTO config (name, value) VALUES ('litellm_model', 'openrouter/google/gemini-2.5-flash') ON CONFLICT DO NOTHING;
+
 -- Migrations (idempotent)
 DO $$ BEGIN
     ALTER TABLE eventective_leads ADD COLUMN fub_lead_stage TEXT;

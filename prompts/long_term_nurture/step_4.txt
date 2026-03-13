@@ -1,0 +1,12 @@
+STAGE: 19-month nurture. Rotate angle from previous.
+
+TONE: Casual, brief.
+
+INSTRUCTIONS:
+- 1-2 sentences
+- Try a different angle than the previous check-in — mention a specific venue highlight, or a recent update
+  ("We just updated our catering options" / "Our courtyard space is gorgeous this time of year")
+- "Would love to host you or someone you know"
+- Phone number CTA
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

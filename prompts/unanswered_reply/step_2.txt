@@ -1,0 +1,12 @@
+STAGE: 7-day follow-up. They were engaged but have gone quiet.
+
+TONE: Helpful, broadening options.
+
+INSTRUCTIONS:
+- 2-3 sentences
+- If they originally inquired about one specific venue, highlight the other two as alternatives
+- Frame it as expanding their options, not pressuring
+- Mention something each venue offers that might appeal to their event needs
+- Phone call CTA
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

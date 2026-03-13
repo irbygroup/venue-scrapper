@@ -1,0 +1,13 @@
+STAGE: Final farewell. Last message we'll send. Be gracious.
+
+TONE: Warm, genuine, closing.
+
+INSTRUCTIONS:
+- 1-2 sentences
+- "Our door is always open if you ever need a venue"
+- Wish them well
+- Include phone number one last time
+- Make it feel like a genuine farewell, not a sales pitch
+- This is the last automated message — make it count
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

@@ -334,3 +334,113 @@ Check progress of all FUB export tasks.
   }
 }
 ```
+
+## Drip Campaigns
+
+### `POST /eventective/drip/process`
+
+Run the drip scheduler. Called automatically by cron every 15 minutes. Generates messages for due campaigns, optionally sends them (if `drip_auto_send=true`), and backfills Sequence 3.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "due_campaigns": 5,
+  "generated": 3,
+  "sent": 3,
+  "send_failed": 0,
+  "cancelled": 1,
+  "skipped": 1,
+  "errors": 0,
+  "backfilled_seq3": 25,
+  "auto_send": false
+}
+```
+
+### `GET /eventective/drip/status`
+
+Dashboard overview of all drip campaigns.
+
+**Response:**
+```json
+{
+  "campaigns_by_sequence": {
+    "new_lead": {"active": 10, "completed": 5},
+    "long_term_nurture": {"active": 100, "cancelled": 3}
+  },
+  "today_sent": {"new_lead": 4, "long_term_nurture": 25},
+  "pending_review": 12,
+  "scheduled": 40,
+  "next_due": [
+    {"EventId": "EGZKF1OT", "sequence": "new_lead", "current_step": 1, "next_scheduled_at": "..."}
+  ],
+  "auto_send": false,
+  "daily_caps": {"new_lead": 0, "unanswered_reply": 25, "long_term_nurture": 25}
+}
+```
+
+### `GET /eventective/drip/{event_id}`
+
+Campaign state and message history for a specific lead.
+
+**Response:**
+```json
+{
+  "campaign": {
+    "EventId": "EGZKF1OT",
+    "sequence": "new_lead",
+    "current_step": 1,
+    "status": "active",
+    "next_scheduled_at": "2026-03-14T...",
+    "created_at": "2026-03-13T..."
+  },
+  "messages": [
+    {
+      "id": 1, "EventId": "EGZKF1OT", "sequence": "new_lead", "step": 0,
+      "message": "Hi Courtney...", "next_step": "reply_now",
+      "result": "success", "sent_at": "2026-03-13T..."
+    }
+  ]
+}
+```
+
+### `POST /eventective/drip/{event_id}/pause`
+
+Manually pause a lead's active drip campaign.
+
+**Response:**
+```json
+{"status": "paused", "event_id": "EGZKF1OT"}
+```
+
+### `POST /eventective/drip/{event_id}/resume`
+
+Resume a paused drip campaign. Recalculates scheduling from now.
+
+**Response:**
+```json
+{"status": "resumed", "event_id": "EGZKF1OT"}
+```
+
+### `POST /eventective/drip/{event_id}/cancel`
+
+Cancel a drip campaign with a reason.
+
+**Body:**
+```json
+{"reason": "manually excluded"}
+```
+
+**Response:**
+```json
+{"status": "cancelled", "event_id": "EGZKF1OT", "reason": "manually excluded"}
+```
+
+### `POST /eventective/drip/{event_id}/send`
+
+Approve and send the next `pending_review` message for a lead. Used when `drip_auto_send=false`.
+
+**Response:**
+```json
+{"status": "sent", "event_id": "EGZKF1OT", "message_id": 42}
+```

@@ -1,0 +1,12 @@
+STAGE: 1-day follow-up. They haven't replied to our initial message yet.
+
+TONE: Friendly, brief, not pushy.
+
+INSTRUCTIONS:
+- Keep it to 2 sentences maximum
+- Reference that you reached out yesterday briefly ("Just following up on my message about your [event type]")
+- Do NOT repeat any information from the first message
+- Gently re-offer the phone call
+- Do NOT say things like "I know you're busy" or apologize for following up
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

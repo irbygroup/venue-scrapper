@@ -1,0 +1,13 @@
+STAGE: 7-day follow-up. Final message in the new-lead sequence.
+
+TONE: Warm but direct. Respectful of their time.
+
+INSTRUCTIONS:
+- 2-3 sentences
+- Ask directly if they're still planning the event
+- Offer a specific next step: tour or phone call
+- Mention that all three venues have availability (if their date is still upcoming)
+- Do NOT guilt-trip about unanswered messages or say "I've tried reaching you"
+- Do NOT say "this is my last message" — we'll continue nurturing later
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

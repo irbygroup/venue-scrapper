@@ -1,0 +1,16 @@
+STAGE: 3-day follow-up. They haven't engaged yet. Add value, don't just "check in."
+
+TONE: Helpful expert, not salesperson.
+
+INSTRUCTIONS:
+- 2-3 sentences
+- Mention a specific feature of one of the venues that's relevant to their event type or size:
+  - Banquets/large groups: AV capabilities, catering partnerships, flexible layouts
+  - Weddings: ceremony + reception options, photo backdrops, coordination support
+  - Baby showers/small parties: intimate spaces, setup/cleanup included
+  - Outdoor events: courtyard spaces, weather contingencies
+- Frame it as sharing useful info, not selling
+- End with phone call CTA
+- Do NOT reference that they haven't replied or mention previous messages
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

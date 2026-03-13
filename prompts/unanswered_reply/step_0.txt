@@ -1,0 +1,12 @@
+STAGE: They replied to us, we replied back, and they've gone silent for 1 day.
+
+TONE: Conversational, light.
+
+INSTRUCTIONS:
+- 2 sentences maximum
+- Reference the conversation naturally — what were you last discussing?
+- Do NOT repeat information you already gave them
+- Offer to continue the conversation by phone
+- This person was engaged — keep the energy going without being pushy
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

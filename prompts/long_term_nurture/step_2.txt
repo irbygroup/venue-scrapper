@@ -1,0 +1,12 @@
+STAGE: 7-month nurture check-in. Very light touch.
+
+TONE: Brief, seasonal, no-pressure.
+
+INSTRUCTIONS:
+- 1-2 sentences only
+- Use a seasonal hook if possible ("Fall is a beautiful time for events in Mobile" / "Summer dates are filling up")
+- "Our venues are booking up for [season]"
+- Do NOT reference any previous conversation or their original inquiry
+- Phone number CTA
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality

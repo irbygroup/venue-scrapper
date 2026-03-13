@@ -1,0 +1,13 @@
+STAGE: 3-day follow-up after they went silent mid-conversation.
+
+TONE: Understanding, solution-oriented.
+
+INSTRUCTIONS:
+- 2-3 sentences
+- Read their last message carefully — what was their concern or question?
+- Address that concern with a FRESH angle (not repeating what we already said)
+- If they had a pricing concern: redirect to phone call to discuss custom packages (never quote numbers)
+- If they had a timing/duration concern: emphasize flexibility across all three venues
+- If they had a location concern: acknowledge it and mention our other venues
+
+SIGN OFF: {{agent_name}}, Yellowhammer Hospitality
