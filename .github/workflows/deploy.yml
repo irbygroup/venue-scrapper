@@ -1,0 +1,32 @@
+name: Deploy to mind365
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false  # don't cancel in-flight deploys — let them finish
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Join Tailscale network
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-venue-scrapper
+      - name: Deploy via SSH
+        run: |
+          host=$(echo "${{ vars.MIND365_HOST }}" | tr -cd 'A-Za-z0-9.:-')
+          ssh -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=10 \
+              root@${host} \
+              /root/gitops-mind365/tools/deploy-venue-scrapper.sh

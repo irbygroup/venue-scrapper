@@ -35,8 +35,8 @@ sudo journalctl -u venue-scrapper -f
 # Container shell
 docker exec -it venue-scrapper bash
 
-# Re-copy leads.db from Mac
-scp leads.db mind365:/opt/venue-scrapper/data/
+# Connect to venue-scrapper database
+psql -U venue_scrapper -d venue_scrapper -h 127.0.0.1
 ```
 
 ## Architecture
@@ -53,7 +53,7 @@ All Playwright calls go through the same browser context (shared cookies, consis
 
 ### Smart incremental sync (`POST /eventective/sync`)
 
-The Eventective inbox sidebar is sorted by `LastActivityDttm DESC`. Sync fetches batches of 20 via the `getmessagesforinbox` API. The moment it encounters a lead whose `LastActivityDttm <= last_sync_time`, it stops — everything below is stale. New/changed leads are fetched individually via `geteventdetails`. Last sync time stored in `sync_meta` SQLite table.
+The Eventective inbox sidebar is sorted by `LastActivityDttm DESC`. Sync fetches batches of 20 via the `getmessagesforinbox` API. The moment it encounters a lead whose `LastActivityDttm <= last_sync_time`, it stops — everything below is stale. New/changed leads are fetched individually via `geteventdetails`. Last sync time stored in `sync_meta` table.
 
 ### Reply flow (`POST /eventective/leads/{id}/reply`)
 
@@ -65,13 +65,15 @@ Navigates `reply_page` to the lead's message URL, types character-by-character (
 
 ### Database
 
-SQLite at `leads.db` (local) or `/data/leads.db` (container). Tables:
+PostgreSQL 15 on vm-mind365 (database: `venue_scrapper`, role: `venue_scrapper`). Connection via `DATABASE_URL` env var. Tables:
 - `config` — key/value configuration (credentials, URLs, cookies, FUB keys)
 - `eventective_leads` — merged inbox metadata + full contact/event details per lead, with FUB tracking fields
 - `eventective_lead_activities` — full message thread for each lead, with FUB tracking fields
 - `sync_meta` — `last_sync_time` key/value
 
-All config (credentials, URLs, batch sizes) is stored in the `config` table and read at request-time — no env vars needed except `DB_PATH`.
+All config (credentials, URLs, batch sizes) is stored in the `config` table and read at request-time. Only env var needed: `DATABASE_URL`.
+
+**Migration:** `migrate_to_pg.py` is the one-time SQLite→PG migration script. `schema_pg.sql` is the reference PostgreSQL DDL.
 
 ### FUB tracking fields
 
@@ -88,17 +90,14 @@ See **[API.md](API.md)** for full endpoint documentation with request/response e
 
 ## Schema management
 
-After any schema change, run:
-```bash
-./export_schema.sh leads.db
-```
-This exports the full schema + config seed rows (secrets purged) to `schema.sql`.
+SQLite schema (for reference/local dev): `schema.sql` — exported via `./export_schema.sh leads.db`
+PostgreSQL schema (production): `schema_pg.sql` — manually maintained DDL
 
-**IMPORTANT: Always run `export_schema.sh` after any schema change.**
+**IMPORTANT: After any schema change, update both `schema.sql` (run `export_schema.sh`) and `schema_pg.sql`.**
 
 ## Container
 
-Built from `mcr.microsoft.com/playwright/python:v1.50.0-noble`. Data volume at `/data` (leads.db). Only env var needed: `DB_PATH=/data/leads.db`. Port `5050` bound to `127.0.0.1` only.
+Built from `mcr.microsoft.com/playwright/python:v1.50.0-noble`. Uses `DATABASE_URL` env var to connect to PostgreSQL (no local data volume needed). Port `5050` bound to `127.0.0.1` only.
 
 ## OpenClaw skill
 
