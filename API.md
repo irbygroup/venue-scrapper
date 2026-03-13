@@ -31,7 +31,7 @@ Check if the browser session is still valid.
 
 ### `POST /eventective/sync`
 
-Incremental sync — fetches new/changed leads from Eventective inbox API, stores details + activities in SQLite. Stops when it reaches leads older than the last sync time.
+Incremental sync — fetches new/changed leads from Eventective inbox API, stores details + activities in SQLite. Stops when it reaches leads older than the last sync time. Automatically triggers FUB incremental export if any changes were found.
 
 **Query params:**
 - `limit` (int, optional) — max leads to scan
@@ -246,3 +246,55 @@ The email includes:
 - Summary stats table (new leads, active leads, our/their replies, total activities)
 - New lead cards with contact info, event details, and notes
 - Activity log grouped by lead with message text
+
+## FUB (Follow Up Boss) Integration
+
+### `POST /eventective/fub-sync`
+
+Start a background backfill export of unexported leads to Follow Up Boss.
+
+**Query params:**
+| Param | Type | Description |
+|-------|------|-------------|
+| `mode` | string | `backfill` (default) — backdates leads; `incremental` — hot lead stage |
+| `limit` | int | Max leads to export (default 0 = unlimited) |
+| `order` | string | `asc` (default) or `desc` — sort by EmailSentDttm |
+
+**Response:**
+```json
+{"status": "started", "mode": "backfill", "limit": "unlimited", "order": "asc"}
+```
+
+### `POST /eventective/fub-export-new`
+
+Manually trigger incremental FUB export — exports new leads (stage "YH | Hot Lead") and new activities on already-exported leads. Same logic that auto-runs after each sync.
+
+**Response:**
+```json
+{"status": "started", "mode": "incremental"}
+```
+
+### `GET /eventective/fub-sync/status`
+
+Check progress of all FUB export tasks.
+
+**Response:**
+```json
+{
+  "asc": {
+    "running": false,
+    "progress": {"exported": 100, "failed": 2, "total": 102, "current_event_id": null},
+    "errors": ["EVENTID1: error message"]
+  },
+  "desc": {
+    "running": false,
+    "progress": {},
+    "errors": []
+  },
+  "incremental": {
+    "running": false,
+    "progress": {"exported": 3, "failed": 0, "total": 3, "activities_exported": 5, "current_event_id": null},
+    "errors": []
+  }
+}
+```

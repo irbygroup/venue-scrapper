@@ -756,6 +756,10 @@ async def run_sync(limit: Optional[int] = None) -> dict:
     set_meta("last_sync_time", started_at.isoformat())
     con.close()
 
+    # Auto-export new leads and activities to FUB
+    if needs_fetch:
+        asyncio.create_task(_fub_incremental_export())
+
     duration = (datetime.now(timezone.utc) - started_at).total_seconds()
     return {
         "duration_seconds": round(duration, 1),
@@ -1397,7 +1401,11 @@ ACTIVITY_LABELS = {
     "FlexOffChg": "Flexibility turned off",
 }
 
-fub_sync_state = {"running": False, "progress": {}, "errors": []}
+fub_sync_state = {
+    "asc": {"running": False, "progress": {}, "errors": []},
+    "desc": {"running": False, "progress": {}, "errors": []},
+    "incremental": {"running": False, "progress": {}, "errors": []},
+}
 
 
 def _fub_headers():
@@ -1464,59 +1472,87 @@ def _fub_stage(lead: dict, mode: str) -> str:
         return "YH | Long Term Nurture"
 
 
-async def _fub_create_event(client: httpx.AsyncClient, lead: dict, fub_person_id, mode: str):
-    """POST /v1/events to create or update person + register the inquiry."""
+async def _fub_create_or_update_person(client: httpx.AsyncClient, lead: dict, fub_person_id, mode: str):
+    """Create or update a FUB person and register the inquiry event."""
     base = _cfg("fub_api_base_url", "https://api.followupboss.com/v1")
 
     first, last = _parse_name(lead["RequestorName"] or "")
     stage = _fub_stage(lead, mode)
-
-    person = {
-        "firstName": first,
-        "lastName": last,
-        "emails": [{"value": lead["RequestorEmailAddress"]}] if lead.get("RequestorEmailAddress") else [],
-        "phones": [{"value": lead["RequestorPhone"]}] if lead.get("RequestorPhone") else [],
-        "tags": ["Eventective"],
-        "stage": stage,
-        "customPrimaryVenueInterest": lead.get("ProviderName", ""),
-    }
-    if fub_person_id:
-        person["id"] = fub_person_id
-
     event_id = lead["EventId"]
-    body = {
-        "source": "Eventective.com",
-        "system": _cfg("fub_system_header", "IRBY-GROUP-FUB-API"),
-        "type": "Inquiry",
-        "message": lead.get("InformationRequested") or "",
-        "contacted": False,
-        "sourceUrl": f"https://www.eventective.com/myeventective/#/crm/Event/Messages/{event_id}",
-        "campaign": {"source": "Eventective.com"},
-        "person": person,
-    }
+    emails = [{"value": lead["RequestorEmailAddress"]}] if lead.get("RequestorEmailAddress") else []
+    phones = [{"value": lead["RequestorPhone"]}] if lead.get("RequestorPhone") else []
 
-    # Only set occurredAt for existing people — for new people with historical
-    # dates, FUB returns 204 and silently discards the event without creating anyone
-    if fub_person_id:
-        body["occurredAt"] = lead.get("EmailSentDttm") or ""
+    if mode == "backfill" and not fub_person_id:
+        # ── Backfill, new person: POST /people with createdAt to backdate ──
+        create_body = {
+            "firstName": first,
+            "lastName": last,
+            "emails": emails,
+            "phones": phones,
+            "tags": ["Eventective"],
+            "stage": stage,
+            "source": "Eventective.com",
+            "contacted": False,
+            "customPrimaryVenueInterest": lead.get("ProviderName", ""),
+            "createdAt": lead.get("EmailSentDttm") or "",
+        }
+        resp = await _fub_request(client, "POST", f"{base}/people", json=create_body)
+        person_id = resp.json()["id"]
 
-    resp = await _fub_request(client, "POST", f"{base}/events", json=body)
+        # Register the inquiry event with occurredAt (historical, no workflows)
+        event_body = {
+            "source": "Eventective.com",
+            "system": _cfg("fub_system_header", "IRBY-GROUP-FUB-API"),
+            "type": "Inquiry",
+            "message": lead.get("InformationRequested") or "",
+            "occurredAt": lead.get("EmailSentDttm") or "",
+            "contacted": False,
+            "sourceUrl": f"https://www.eventective.com/myeventective/#/crm/Event/Messages/{event_id}",
+            "campaign": {"source": "Eventective.com"},
+            "person": {"id": person_id},
+        }
+        await _fub_request(client, "POST", f"{base}/events", json=event_body)
 
-    # 200/201 return person JSON; 204 = historical event (no body)
-    person_id = None
-    if resp.status_code in (200, 201):
-        result = resp.json()
-        person_id = result.get("id") or result.get("person", {}).get("id")
+    else:
+        # ── Incremental (new leads) or existing person: POST /events ──
+        person = {
+            "firstName": first,
+            "lastName": last,
+            "emails": emails,
+            "phones": phones,
+            "tags": ["Eventective"],
+            "stage": stage,
+            "customPrimaryVenueInterest": lead.get("ProviderName", ""),
+        }
+        if fub_person_id:
+            person["id"] = fub_person_id
 
-    # If 204 or no ID, search for the person we just created/updated
-    if not person_id:
-        person_id = await _fub_search_person(client, lead.get("RequestorPhone") or "", lead.get("RequestorEmailAddress") or "")
+        event_body = {
+            "source": "Eventective.com",
+            "system": _cfg("fub_system_header", "IRBY-GROUP-FUB-API"),
+            "type": "Inquiry",
+            "message": lead.get("InformationRequested") or "",
+            "contacted": False,
+            "sourceUrl": f"https://www.eventective.com/myeventective/#/crm/Event/Messages/{event_id}",
+            "campaign": {"source": "Eventective.com"},
+            "person": person,
+        }
+        # Historical occurredAt for backfill existing people; omit for incremental (triggers workflows)
+        if mode == "backfill":
+            event_body["occurredAt"] = lead.get("EmailSentDttm") or ""
 
-    if not person_id:
-        raise ValueError(f"Could not resolve FUB person after events POST for {event_id}")
+        resp = await _fub_request(client, "POST", f"{base}/events", json=event_body)
 
-    # PUT /v1/people to ensure name, stage, contacted are set
-    # (events POST doesn't override these for existing people)
+        person_id = None
+        if resp.status_code in (200, 201):
+            result = resp.json()
+            person_id = result.get("id") or result.get("person", {}).get("id")
+        if not person_id:
+            person_id = await _fub_search_person(client, lead.get("RequestorPhone") or "", lead.get("RequestorEmailAddress") or "")
+        if not person_id:
+            raise ValueError(f"Could not resolve FUB person after events POST for {event_id}")
+
+    # PUT /v1/people to ensure name, stage, contacted, venue are set
     update_body = {
         "firstName": first,
         "lastName": last,
@@ -1528,22 +1564,18 @@ async def _fub_create_event(client: httpx.AsyncClient, lead: dict, fub_person_id
         await _fub_request(client, "PUT", f"{base}/people/{person_id}", json=update_body)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
-            # Ghost person from a prior failed historical event — create via POST /people
-            print(f"[fub-sync] person {person_id} is a ghost (404 on PUT), creating via /people for {event_id}")
+            # Ghost person — create via POST /people as fallback
+            print(f"[fub-sync] person {person_id} is a ghost (404), creating via /people for {event_id}")
             create_body = {
-                "firstName": first,
-                "lastName": last,
-                "emails": [{"value": lead["RequestorEmailAddress"]}] if lead.get("RequestorEmailAddress") else [],
-                "phones": [{"value": lead["RequestorPhone"]}] if lead.get("RequestorPhone") else [],
-                "tags": ["Eventective"],
-                "stage": stage,
-                "source": "Eventective.com",
-                "contacted": False,
+                "firstName": first, "lastName": last,
+                "emails": emails, "phones": phones,
+                "tags": ["Eventective"], "stage": stage,
+                "source": "Eventective.com", "contacted": False,
                 "customPrimaryVenueInterest": lead.get("ProviderName", ""),
+                "createdAt": lead.get("EmailSentDttm") or "",
             }
             resp2 = await _fub_request(client, "POST", f"{base}/people", json=create_body)
-            result2 = resp2.json()
-            person_id = result2["id"]
+            person_id = resp2.json()["id"]
         else:
             raise
 
@@ -1575,7 +1607,7 @@ async def _fub_export_lead(client: httpx.AsyncClient, lead: dict, mode: str):
     fub_person_id = await _fub_search_person(client, phone, email_addr)
 
     # Step 2: create/update via events POST
-    fub_person_id = await _fub_create_event(client, lead, fub_person_id, mode)
+    fub_person_id = await _fub_create_or_update_person(client, lead, fub_person_id, mode)
 
     if not fub_person_id:
         raise ValueError(f"No person ID returned from FUB for {event_id}")
@@ -1659,62 +1691,209 @@ async def _fub_export_lead(client: httpx.AsyncClient, lead: dict, mode: str):
     return fub_person_id
 
 
-async def _fub_sync_task(mode: str, limit: int = 0):
+async def _fub_export_new_activities(client: httpx.AsyncClient, state: dict):
+    """Export only new (fub_exported=0) activities on already-exported leads."""
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        """SELECT DISTINCT el.EventId, el.fub_people_id
+           FROM eventective_leads el
+           JOIN eventective_lead_activities ela ON ela.EventId = el.EventId
+           WHERE el.fub_exported=1 AND el.fub_people_id IS NOT NULL AND ela.fub_exported=0"""
+    ).fetchall()
+    con.close()
+
+    for row in rows:
+        event_id = row["EventId"]
+        fub_people_id = int(row["fub_people_id"])
+        try:
+            con2 = sqlite3.connect(DB_PATH)
+            con2.row_factory = sqlite3.Row
+            activities = con2.execute(
+                "SELECT * FROM eventective_lead_activities WHERE EventId=? AND fub_exported=0 ORDER BY DateTime ASC",
+                (event_id,)
+            ).fetchall()
+            con2.close()
+
+            messages = []
+            timeline_lines = []
+            for act in activities:
+                atype = act["ActivityTypeCd"]
+                dt_long = act["DateTimeLong"] or act["DateTime"] or ""
+                if atype in ("provplnr", "plnrprov"):
+                    direction = "Outbound" if atype == "provplnr" else "Inbound"
+                    sender = act["Sender"] or ""
+                    recipient = act["Recipient"] or ""
+                    text = act["ResponseText"] or ""
+                    messages.append(f"[Eventective {direction}] {sender} → {recipient} ({dt_long}):\n{text}")
+                elif atype == "ResponseRank":
+                    timeline_lines.append(f"{dt_long} - {act['ResponseText'] or 'Response ranked'}")
+                elif atype in ACTIVITY_LABELS:
+                    timeline_lines.append(f"{dt_long} - {ACTIVITY_LABELS[atype]}")
+
+            for note_body in messages:
+                await _fub_create_note(client, fub_people_id, note_body, subject="Eventective Message")
+
+            if timeline_lines:
+                timeline_body = f"[Eventective Timeline - {event_id}]\n" + "\n".join(timeline_lines)
+                await _fub_create_note(client, fub_people_id, timeline_body, subject="Eventective Timeline")
+
+            now_str = datetime.now(timezone.utc).isoformat()
+            con3 = sqlite3.connect(DB_PATH)
+            con3.execute(
+                "UPDATE eventective_lead_activities SET fub_exported=1, fub_exported_date=?, fub_people_id=? WHERE EventId=? AND fub_exported=0",
+                (now_str, str(fub_people_id), event_id)
+            )
+            con3.commit()
+            con3.close()
+
+            state["progress"]["activities_exported"] = state["progress"].get("activities_exported", 0) + len(activities)
+            print(f"[fub-incremental] exported {len(activities)} new activities for {event_id} → FUB person {fub_people_id}")
+        except Exception as e:
+            err_msg = f"activities {event_id}: {e}"
+            state["errors"].append(err_msg)
+            print(f"[fub-incremental] FAILED {err_msg}")
+            traceback.print_exc()
+
+
+async def _fub_incremental_export():
+    """Export new leads and new activities on existing leads to FUB."""
+    state = fub_sync_state["incremental"]
+    if state["running"]:
+        print("[fub-incremental] already running, skipping")
+        return
+    state["running"] = True
+    state["errors"] = []
+    state["progress"] = {"exported": 0, "failed": 0, "total": 0, "activities_exported": 0, "current_event_id": None}
+
+    try:
+        # Pass A — new leads (fub_exported=0)
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+        leads = con.execute(
+            "SELECT * FROM eventective_leads WHERE fub_exported=0 ORDER BY EmailSentDttm ASC"
+        ).fetchall()
+        con.close()
+
+        state["progress"]["total"] = len(leads)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for lead in leads:
+                eid = lead["EventId"]
+                state["progress"]["current_event_id"] = eid
+                try:
+                    pid = await _fub_export_lead(client, dict(lead), mode="incremental")
+                    state["progress"]["exported"] += 1
+                    print(f"[fub-incremental] exported new lead {eid} → FUB person {pid}")
+                except Exception as e:
+                    state["progress"]["failed"] += 1
+                    err_msg = f"{eid}: {e}"
+                    state["errors"].append(err_msg)
+                    print(f"[fub-incremental] FAILED {err_msg}")
+                    traceback.print_exc()
+
+            # Pass B — new activities on already-exported leads
+            await _fub_export_new_activities(client, state)
+    finally:
+        state["running"] = False
+        state["progress"]["current_event_id"] = None
+        failed = state["progress"].get("failed", 0)
+        if failed > 0:
+            notify_error(
+                f"FUB incremental export completed with {failed} error(s)",
+                "\n".join(state["errors"][-20:])
+            )
+
+
+async def _fub_sync_task(mode: str, limit: int = 0, order: str = "asc"):
     """Background task: export unexported leads to FUB."""
-    fub_sync_state["running"] = True
-    fub_sync_state["errors"] = []
-    fub_sync_state["progress"] = {"exported": 0, "failed": 0, "total": 0, "current_event_id": None}
+    state = fub_sync_state[order]
+    state["running"] = True
+    state["errors"] = []
+    state["progress"] = {"exported": 0, "failed": 0, "total": 0, "current_event_id": None}
+    tag = f"fub-sync-{order}"
 
     try:
         con = sqlite3.connect(DB_PATH)
         con.row_factory = sqlite3.Row
-        query = "SELECT * FROM eventective_leads WHERE fub_exported=0 ORDER BY EmailSentDttm ASC"
+        direction = "DESC" if order == "desc" else "ASC"
+        query = f"SELECT * FROM eventective_leads WHERE fub_exported=0 ORDER BY EmailSentDttm {direction}"
         if limit > 0:
             query += f" LIMIT {limit}"
         leads = con.execute(query).fetchall()
         con.close()
 
-        fub_sync_state["progress"]["total"] = len(leads)
+        state["progress"]["total"] = len(leads)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             for lead in leads:
+                # Re-check fub_exported in case the other direction already got this lead
+                con2 = sqlite3.connect(DB_PATH)
+                already = con2.execute("SELECT fub_exported FROM eventective_leads WHERE EventId=?", (lead["EventId"],)).fetchone()
+                con2.close()
+                if already and already[0] == 1:
+                    state["progress"]["total"] -= 1
+                    continue
+
                 eid = lead["EventId"]
-                fub_sync_state["progress"]["current_event_id"] = eid
+                state["progress"]["current_event_id"] = eid
                 try:
                     pid = await _fub_export_lead(client, dict(lead), mode)
-                    fub_sync_state["progress"]["exported"] += 1
-                    print(f"[fub-sync] exported {eid} → FUB person {pid}")
+                    state["progress"]["exported"] += 1
+                    print(f"[{tag}] exported {eid} → FUB person {pid}")
                 except Exception as e:
-                    fub_sync_state["progress"]["failed"] += 1
+                    state["progress"]["failed"] += 1
                     err_msg = f"{eid}: {e}"
-                    fub_sync_state["errors"].append(err_msg)
-                    print(f"[fub-sync] FAILED {err_msg}")
+                    state["errors"].append(err_msg)
+                    print(f"[{tag}] FAILED {err_msg}")
                     traceback.print_exc()
     finally:
-        fub_sync_state["running"] = False
-        fub_sync_state["progress"]["current_event_id"] = None
-        failed = fub_sync_state["progress"].get("failed", 0)
+        state["running"] = False
+        state["progress"]["current_event_id"] = None
+        failed = state["progress"].get("failed", 0)
         if failed > 0:
             notify_error(
-                f"FUB sync completed with {failed} error(s)",
-                "\n".join(fub_sync_state["errors"][-20:])
+                f"FUB sync ({order}) completed with {failed} error(s)",
+                "\n".join(state["errors"][-20:])
             )
 
 
 @router.post("/fub-sync")
-async def fub_sync(background_tasks: BackgroundTasks, mode: str = "backfill", limit: int = 0):
-    if fub_sync_state["running"]:
-        raise HTTPException(409, "FUB sync already running")
-    background_tasks.add_task(_fub_sync_task, mode, limit)
-    return {"status": "started", "mode": mode, "limit": limit or "unlimited"}
+async def fub_sync(background_tasks: BackgroundTasks, mode: str = "backfill", limit: int = 0, order: str = "asc"):
+    state = fub_sync_state[order]
+    if state["running"]:
+        raise HTTPException(409, f"FUB sync ({order}) already running")
+    background_tasks.add_task(_fub_sync_task, mode, limit, order)
+    return {"status": "started", "mode": mode, "limit": limit or "unlimited", "order": order}
+
+
+@router.post("/fub-export-new")
+async def fub_export_new(background_tasks: BackgroundTasks):
+    state = fub_sync_state["incremental"]
+    if state["running"]:
+        raise HTTPException(409, "FUB incremental export already running")
+    background_tasks.add_task(_fub_incremental_export)
+    return {"status": "started", "mode": "incremental"}
 
 
 @router.get("/fub-sync/status")
 async def fub_sync_status():
     return {
-        "running": fub_sync_state["running"],
-        "progress": fub_sync_state["progress"],
-        "errors": fub_sync_state["errors"][-20:],
+        "asc": {
+            "running": fub_sync_state["asc"]["running"],
+            "progress": fub_sync_state["asc"]["progress"],
+            "errors": fub_sync_state["asc"]["errors"][-20:],
+        },
+        "desc": {
+            "running": fub_sync_state["desc"]["running"],
+            "progress": fub_sync_state["desc"]["progress"],
+            "errors": fub_sync_state["desc"]["errors"][-20:],
+        },
+        "incremental": {
+            "running": fub_sync_state["incremental"]["running"],
+            "progress": fub_sync_state["incremental"]["progress"],
+            "errors": fub_sync_state["incremental"]["errors"][-20:],
+        },
     }
 
 
