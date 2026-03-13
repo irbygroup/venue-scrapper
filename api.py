@@ -1,6 +1,7 @@
 """
 Eventective Lead Management API
 FastAPI + async Playwright (persistent browser context) + PostgreSQL
+v2.0 — PostgreSQL backend
 """
 
 import asyncio
