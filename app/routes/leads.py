@@ -140,6 +140,82 @@ async def get_lead(event_id: str):
     return build_lead_detail(row_dict, row_dict, acts)
 
 
+async def _do_send_reply(event_id: str, message: str) -> dict:
+    """
+    Core reply logic — send a message via Playwright DOM interaction.
+    Returns dict with success/error info. Used by both the HTTP endpoint and drip batch sender.
+    """
+    bm = state_mod.get_bm()
+
+    # Ensure session first
+    if not await bm.ensure_session():
+        return {"success": False, "error": "Session expired and auto-login failed"}
+
+    page = bm.reply_page
+    # Ensure reply_page has visited the inbox first (cold page needs domain context)
+    if "eventective.com" not in page.url:
+        await page.goto(inbox_url(), wait_until="domcontentloaded")
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        await asyncio.sleep(1)
+
+    msg_url = f"https://www.eventective.com/myeventective/#/crm/Event/Messages/{event_id}"
+    await page.goto(msg_url, wait_until="domcontentloaded")
+    await page.wait_for_load_state("networkidle", timeout=15000)
+    await asyncio.sleep(2)
+
+    textarea = page.locator('textarea[placeholder="Enter your reply here"]')
+    try:
+        await textarea.wait_for(state="visible", timeout=10000)
+    except Exception:
+        notify_error("Reply failed — no reply box", f"Could not find reply textarea for lead {event_id}. Lead may be closed.")
+        return {"success": False, "error": "Reply box not found — lead may be closed"}
+
+    await textarea.click()
+    await asyncio.sleep(0.3)
+    await textarea.type(message, delay=20)  # type char-by-char to trigger Angular events
+    await asyncio.sleep(0.8)
+
+    sent = await page.evaluate("""
+        () => {
+            // Send button lives in the direct parent (.send-message-wrapper) of the textarea
+            const textarea = document.querySelector('textarea[placeholder="Enter your reply here"]');
+            if (!textarea) return 'no_textarea';
+            const parent = textarea.parentElement;
+            const btn = Array.from(parent.querySelectorAll('a[href="javascript:void(0)"]'))
+                .find(a => a.textContent.trim() === '');
+            if (!btn) return 'no_button';
+            btn.click();
+            return 'clicked';
+        }
+    """)
+
+    if sent != 'clicked':
+        notify_error("Reply failed — send button", f"Send button not found for lead {event_id}: {sent}")
+        return {"success": False, "error": f"Send button not found: {sent}"}
+
+    await asyncio.sleep(2)
+
+    # Verify by fetching thread
+    detail = await bm.fetch(f"/api/v1/salesandcatering/geteventdetails?id={event_id}")
+    our_msgs = [a for a in (detail.get("Activities") or []) if a.get("ActivityTypeCd") == "provplnr"]
+    sent_at  = our_msgs[-1].get("DateTime") if our_msgs else None
+
+    # Update DB
+    con = get_db()
+    cur = con.cursor(cursor_factory=RealDictCursor)
+    upsert_activities(cur, event_id, detail.get("Activities") or [])
+    con.commit()
+    con.close()
+
+    return {
+        "success":      True,
+        "event_id":     event_id,
+        "message_sent": message,
+        "sent_at":      sent_at,
+        "thread_length": len(detail.get("Activities") or []),
+    }
+
+
 @router.post("/leads/{event_id}/reply")
 async def send_reply(event_id: str, req: ReplyRequest):
     """Send a message via Playwright DOM interaction."""
@@ -148,70 +224,10 @@ async def send_reply(event_id: str, req: ReplyRequest):
         raise HTTPException(status_code=409, detail="Reply already in progress")
 
     async with bm.reply_lock:
-        # Ensure session first
-        if not await bm.ensure_session():
-            raise HTTPException(status_code=401, detail="Session expired and auto-login failed")
+        result = await _do_send_reply(event_id, req.message)
 
-        page = bm.reply_page
-        # Ensure reply_page has visited the inbox first (cold page needs domain context)
-        if "eventective.com" not in page.url:
-            await page.goto(inbox_url(), wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=15000)
-            await asyncio.sleep(1)
+    if not result["success"]:
+        status_code = 401 if "Session" in result["error"] else 404 if "not found" in result["error"] else 500
+        raise HTTPException(status_code=status_code, detail=result["error"])
 
-        msg_url = f"https://www.eventective.com/myeventective/#/crm/Event/Messages/{event_id}"
-        await page.goto(msg_url, wait_until="domcontentloaded")
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        await asyncio.sleep(2)
-
-        textarea = page.locator('textarea[placeholder="Enter your reply here"]')
-        try:
-            await textarea.wait_for(state="visible", timeout=10000)
-        except Exception:
-            notify_error("Reply failed — no reply box", f"Could not find reply textarea for lead {event_id}. Lead may be closed.")
-            raise HTTPException(status_code=404, detail="Reply box not found — lead may be closed")
-
-        await textarea.click()
-        await asyncio.sleep(0.3)
-        await textarea.type(req.message, delay=20)  # type char-by-char to trigger Angular events
-        await asyncio.sleep(0.8)
-
-        sent = await page.evaluate("""
-            () => {
-                // Send button lives in the direct parent (.send-message-wrapper) of the textarea
-                const textarea = document.querySelector('textarea[placeholder="Enter your reply here"]');
-                if (!textarea) return 'no_textarea';
-                const parent = textarea.parentElement;
-                const btn = Array.from(parent.querySelectorAll('a[href="javascript:void(0)"]'))
-                    .find(a => a.textContent.trim() === '');
-                if (!btn) return 'no_button';
-                btn.click();
-                return 'clicked';
-            }
-        """)
-
-        if sent != 'clicked':
-            notify_error("Reply failed — send button", f"Send button not found for lead {event_id}: {sent}")
-            raise HTTPException(status_code=500, detail=f"Send button not found: {sent}")
-
-        await asyncio.sleep(2)
-
-        # Verify by fetching thread
-        detail = await bm.fetch(f"/api/v1/salesandcatering/geteventdetails?id={event_id}")
-        our_msgs = [a for a in (detail.get("Activities") or []) if a.get("ActivityTypeCd") == "provplnr"]
-        sent_at  = our_msgs[-1].get("DateTime") if our_msgs else None
-
-        # Update DB
-        con = get_db()
-        cur = con.cursor(cursor_factory=RealDictCursor)
-        upsert_activities(cur, event_id, detail.get("Activities") or [])
-        con.commit()
-        con.close()
-
-        return {
-            "success":      True,
-            "event_id":     event_id,
-            "message_sent": req.message,
-            "sent_at":      sent_at,
-            "thread_length": len(detail.get("Activities") or []),
-        }
+    return result

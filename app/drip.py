@@ -260,17 +260,21 @@ def handle_lead_reply(cur, event_id: str):
 
 async def send_batch(messages: list[dict]) -> dict:
     """
-    Send a batch of messages via the reply endpoint with human-like delays.
+    Send a batch of messages directly via Playwright with human-like delays.
     Each item: {event_id, message_text, drip_message_id}
+    Calls _do_send_reply directly (no HTTP self-call).
     """
     if not messages:
         return {"sent": 0, "failed": 0}
 
+    from app.routes.leads import _do_send_reply
+    from app import state as state_mod
+
+    bm = state_mod.get_bm()
     sent = 0
     failed = 0
-    api_base = "http://localhost:5050/eventective"
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with bm.reply_lock:
         for i, msg in enumerate(messages):
             if i > 0:
                 delay = random.uniform(5, 10)
@@ -278,18 +282,15 @@ async def send_batch(messages: list[dict]) -> dict:
                 await asyncio.sleep(delay)
 
             try:
-                resp = await client.post(
-                    f"{api_base}/leads/{msg['event_id']}/reply",
-                    json={"message": msg["message_text"]},
-                )
-                if resp.status_code == 200:
+                reply_result = await _do_send_reply(msg["event_id"], msg["message_text"])
+                if reply_result.get("success"):
                     result = "success"
                     sent += 1
                     log.info(f"Sent drip message to {msg['event_id']}")
                 else:
-                    result = f"failed:{resp.status_code}"
+                    result = f"failed:{reply_result.get('error', 'unknown')}"
                     failed += 1
-                    log.error(f"Send failed for {msg['event_id']}: {resp.status_code}")
+                    log.error(f"Send failed for {msg['event_id']}: {reply_result.get('error')}")
             except Exception as e:
                 result = f"failed:{e}"
                 failed += 1
