@@ -45,7 +45,14 @@ def migrate(sqlite_path: str, pg_url: str):
             if table == "eventective_lead_activities":
                 cols = [c for c in cols if c != "id"]
 
-            col_list = ", ".join(cols)
+            # Double-quote CamelCase column names for PostgreSQL case preservation
+            # Lowercase-only columns (name, key, value, id, fub_*) don't need quoting
+            def _q(c):
+                if c != c.lower():
+                    return f'"{c}"'
+                return c
+
+            col_list = ", ".join(_q(c) for c in cols)
             placeholders = ", ".join(["%s"] * len(cols))
 
             if table == "config":
@@ -63,12 +70,12 @@ def migrate(sqlite_path: str, pg_url: str):
                 # ON CONFLICT DO NOTHING for leads (keep existing)
                 upsert = (
                     f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
-                    f"ON CONFLICT (EventId) DO NOTHING"
+                    f'ON CONFLICT ("EventId") DO NOTHING'
                 )
             elif table == "eventective_lead_activities":
                 upsert = (
                     f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
-                    f"ON CONFLICT (EventId, DateTime, ActivityTypeCd, ResponseNum) DO NOTHING"
+                    f'ON CONFLICT ("EventId", "DateTime", "ActivityTypeCd", "ResponseNum") DO NOTHING'
                 )
             else:
                 upsert = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"

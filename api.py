@@ -1,13 +1,14 @@
 """
 Eventective Lead Management API
-FastAPI + async Playwright (persistent browser context) + SQLite
+FastAPI + async Playwright (persistent browser context) + PostgreSQL
 """
 
 import asyncio
 import json
 import os
 import random
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -24,14 +25,16 @@ from sendgrid.helpers.mail import Mail, Email, To, Content, HtmlContent
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-DB_PATH = os.getenv("DB_PATH", "leads.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def get_config(key: str, default: str = "") -> str:
     """Read a config value from the config table, falling back to default."""
     try:
-        con = sqlite3.connect(DB_PATH)
-        row = con.execute("SELECT value FROM config WHERE name=?", (key,)).fetchone()
+        con = psycopg2.connect(DATABASE_URL)
+        cur = con.cursor()
+        cur.execute("SELECT value FROM config WHERE name=%s", (key,))
+        row = cur.fetchone()
         con.close()
         return row[0] if row else default
     except Exception:
@@ -118,9 +121,10 @@ class BrowserManager:
 
     async def save_cookies(self):
         cookies = await self.context.cookies()
-        con = sqlite3.connect(DB_PATH)
-        con.execute(
-            "INSERT OR REPLACE INTO config (name, value) VALUES (?, ?)",
+        con = psycopg2.connect(DATABASE_URL)
+        cur = con.cursor()
+        cur.execute(
+            "INSERT INTO config (name, value) VALUES (%s, %s) ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
             ("eventective_cookies", json.dumps(cookies))
         )
         con.commit()
@@ -215,159 +219,64 @@ router = APIRouter(prefix="/eventective")
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
-def get_db() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
+def get_db():
+    con = psycopg2.connect(DATABASE_URL)
     return con
 
 
 def init_db():
     con = get_db()
-    con.executescript("""
-        CREATE TABLE IF NOT EXISTS config (
-            name  TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS sync_meta (
-            key   TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS eventective_leads (
-            EventId                 TEXT PRIMARY KEY,
-            RequestGuid             TEXT,
-            RequestProviderNum      INTEGER,
-            ProviderNum             INTEGER,
-            ProviderName            TEXT,
-            EmailSentDttm           TEXT,
-            IsFlagged               INTEGER,
-            PurchasedLead           INTEGER,
-            DirectLead              INTEGER,
-            EventDate               TEXT,
-            AttendeeCount           INTEGER,
-            PlannerName             TEXT,
-            PlannerStatusCd         TEXT,
-            LastActivityDttm        TEXT,
-            LastActivity            TEXT,
-            LastActivityType        TEXT,
-            LastActivityIsAutoResponse INTEGER,
-            LastActivitySender      TEXT,
-            AvatarMediaNum          INTEGER,
-            IsRead                  INTEGER,
-            UnreadCount             INTEGER,
-            LeadStatus              TEXT,
-            IsAvailable             INTEGER,
-            DateAvailableType       TEXT,
-            EventType               TEXT,
-            EventNum                INTEGER,
-            GmtOffsetHours          REAL,
-            Source                  TEXT,
-            DetailScrapedAt         TEXT,
-            ProviderNameFull        TEXT,
-            ProviderEmailGeneric    TEXT,
-            RequestorName           TEXT,
-            RequestorEmailAddress   TEXT,
-            RequestorPhone          TEXT,
-            RequestorContactPref    TEXT,
-            EventName               TEXT,
-            DatePossible1           TEXT,
-            DateAvailable           INTEGER,
-            DateFlexible            INTEGER,
-            Duration                TEXT,
-            TimePossible1           TEXT,
-            BudgetValue             REAL,
-            DirectLeadLocation      TEXT,
-            InformationRequested    TEXT,
-            ServicesRequested       TEXT,
-            FoodRequired            INTEGER,
-            VenueProvidesFood       INTEGER,
-            CatererProvidesFood     INTEGER,
-            SelfProvidesFood        INTEGER,
-            IsEmailReguser          INTEGER,
-            PhoneViewed             INTEGER,
-            PhoneViewedDttm         TEXT,
-            EmailViewed             INTEGER,
-            EmailViewedDttm         TEXT,
-            ConfirmReceivedDttm     TEXT,
-            IsStripeEnabled         INTEGER,
-            IsSquareEnabled         INTEGER,
-            ScrapedAt               TEXT,
-            fub_exported            INTEGER DEFAULT 0,
-            fub_exported_date       TEXT,
-            fub_people_id           TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_el_lastactivity ON eventective_leads(LastActivityDttm);
-        CREATE INDEX IF NOT EXISTS idx_el_fub_exported ON eventective_leads(fub_exported);
-        CREATE TABLE IF NOT EXISTS eventective_lead_activities (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            EventId             TEXT NOT NULL,
-            DateTime            TEXT,
-            DateTimeLong        TEXT,
-            ActivityTypeCd      TEXT,
-            Sender              TEXT,
-            Recipient           TEXT,
-            ResponseText        TEXT,
-            IsRead              INTEGER,
-            ResponseNum         INTEGER,
-            HasAttachments      INTEGER,
-            IsAutoResponse      INTEGER,
-            EventDocumentNum    INTEGER,
-            EventPaymentNum     INTEGER,
-            PaymentAmount       REAL,
-            ReguserNum          INTEGER,
-            ActionNum           INTEGER,
-            fub_exported            INTEGER DEFAULT 0,
-            fub_exported_date       TEXT,
-            fub_people_id           TEXT,
-            UNIQUE(EventId, DateTime, ActivityTypeCd, ResponseNum)
-        );
-        CREATE INDEX IF NOT EXISTS idx_ela_eventid ON eventective_lead_activities(EventId);
-        CREATE INDEX IF NOT EXISTS idx_ela_fub_exported ON eventective_lead_activities(fub_exported);
-    """)
+    cur = con.cursor()
+    schema_path = os.path.join(os.path.dirname(__file__), "schema_pg.sql")
+    cur.execute(open(schema_path).read())
     con.commit()
     con.close()
 
 
 def get_meta(key: str) -> Optional[str]:
     con = get_db()
-    row = con.execute("SELECT value FROM sync_meta WHERE key=?", (key,)).fetchone()
+    cur = con.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT value FROM sync_meta WHERE key=%s", (key,))
+    row = cur.fetchone()
     con.close()
     return row["value"] if row else None
 
 
 def set_meta(key: str, value: str):
     con = get_db()
-    con.execute("INSERT OR REPLACE INTO sync_meta VALUES (?,?)", (key, value))
+    cur = con.cursor()
+    cur.execute("INSERT INTO sync_meta VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, value))
     con.commit()
     con.close()
 
 
-def upsert_inbox_lead(con, lead: dict):
-    con.execute("""
+def upsert_inbox_lead(cur, lead: dict):
+    cur.execute("""
         INSERT INTO eventective_leads (
-            EventId, RequestGuid, RequestProviderNum, ProviderNum, ProviderName,
-            EmailSentDttm, IsFlagged, PurchasedLead, DirectLead, EventDate,
-            AttendeeCount, PlannerName, PlannerStatusCd, LastActivityDttm,
-            LastActivity, LastActivityType, LastActivityIsAutoResponse,
-            LastActivitySender, AvatarMediaNum, IsRead, UnreadCount,
-            LeadStatus, IsAvailable, DateAvailableType, EventType,
-            EventNum, GmtOffsetHours, Source
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(EventId) DO UPDATE SET
-            RequestGuid=excluded.RequestGuid, RequestProviderNum=excluded.RequestProviderNum,
-            ProviderNum=excluded.ProviderNum, ProviderName=excluded.ProviderName,
-            EmailSentDttm=excluded.EmailSentDttm, IsFlagged=excluded.IsFlagged,
-            PurchasedLead=excluded.PurchasedLead, DirectLead=excluded.DirectLead,
-            EventDate=excluded.EventDate, AttendeeCount=excluded.AttendeeCount,
-            PlannerName=excluded.PlannerName, PlannerStatusCd=excluded.PlannerStatusCd,
-            LastActivityDttm=excluded.LastActivityDttm, LastActivity=excluded.LastActivity,
-            LastActivityType=excluded.LastActivityType,
-            LastActivityIsAutoResponse=excluded.LastActivityIsAutoResponse,
-            LastActivitySender=excluded.LastActivitySender, AvatarMediaNum=excluded.AvatarMediaNum,
-            IsRead=excluded.IsRead, UnreadCount=excluded.UnreadCount,
-            LeadStatus=excluded.LeadStatus, IsAvailable=excluded.IsAvailable,
-            DateAvailableType=excluded.DateAvailableType, EventType=excluded.EventType,
-            EventNum=excluded.EventNum, GmtOffsetHours=excluded.GmtOffsetHours,
-            Source=excluded.Source
+            "EventId", "RequestGuid", "RequestProviderNum", "ProviderNum", "ProviderName",
+            "EmailSentDttm", "IsFlagged", "PurchasedLead", "DirectLead", "EventDate",
+            "AttendeeCount", "PlannerName", "PlannerStatusCd", "LastActivityDttm",
+            "LastActivity", "LastActivityType", "LastActivityIsAutoResponse",
+            "LastActivitySender", "AvatarMediaNum", "IsRead", "UnreadCount",
+            "LeadStatus", "IsAvailable", "DateAvailableType", "EventType",
+            "EventNum", "GmtOffsetHours", "Source"
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT("EventId") DO UPDATE SET
+            "RequestGuid"=excluded."RequestGuid", "RequestProviderNum"=excluded."RequestProviderNum",
+            "ProviderNum"=excluded."ProviderNum", "ProviderName"=excluded."ProviderName",
+            "EmailSentDttm"=excluded."EmailSentDttm", "IsFlagged"=excluded."IsFlagged",
+            "PurchasedLead"=excluded."PurchasedLead", "DirectLead"=excluded."DirectLead",
+            "EventDate"=excluded."EventDate", "AttendeeCount"=excluded."AttendeeCount",
+            "PlannerName"=excluded."PlannerName", "PlannerStatusCd"=excluded."PlannerStatusCd",
+            "LastActivityDttm"=excluded."LastActivityDttm", "LastActivity"=excluded."LastActivity",
+            "LastActivityType"=excluded."LastActivityType",
+            "LastActivityIsAutoResponse"=excluded."LastActivityIsAutoResponse",
+            "LastActivitySender"=excluded."LastActivitySender", "AvatarMediaNum"=excluded."AvatarMediaNum",
+            "IsRead"=excluded."IsRead", "UnreadCount"=excluded."UnreadCount",
+            "LeadStatus"=excluded."LeadStatus", "IsAvailable"=excluded."IsAvailable",
+            "DateAvailableType"=excluded."DateAvailableType", "EventType"=excluded."EventType",
+            "EventNum"=excluded."EventNum", "GmtOffsetHours"=excluded."GmtOffsetHours",
+            "Source"=excluded."Source"
     """, (
         lead.get("EventId"), lead.get("RequestGuid"), lead.get("RequestProviderNum"),
         lead.get("ProviderNum"), lead.get("ProviderName"), lead.get("EmailSentDttm"),
@@ -382,24 +291,24 @@ def upsert_inbox_lead(con, lead: dict):
     ))
 
 
-def upsert_lead_details(con, event_id: str, d: dict):
+def upsert_lead_details(cur, event_id: str, d: dict):
     """Update the detail columns on the merged eventective_leads row."""
-    con.execute("""
+    cur.execute("""
         UPDATE eventective_leads SET
-            ProviderNum=?, ProviderNameFull=?, ProviderEmailGeneric=?,
-            RequestorName=?, RequestorEmailAddress=?, RequestorPhone=?,
-            RequestorContactPref=?, EventName=?, EventType=?,
-            AttendeeCount=?, DatePossible1=?, DateAvailable=?,
-            DateAvailableType=?, DateFlexible=?, Duration=?,
-            TimePossible1=?, LeadStatus=?, EmailSentDttm=?,
-            DirectLead=?, PurchasedLead=?, BudgetValue=?,
-            DirectLeadLocation=?, InformationRequested=?, ServicesRequested=?,
-            FoodRequired=?, VenueProvidesFood=?, CatererProvidesFood=?,
-            SelfProvidesFood=?, IsFlagged=?, IsRead=?, IsEmailReguser=?,
-            PhoneViewed=?, PhoneViewedDttm=?, EmailViewed=?, EmailViewedDttm=?,
-            ConfirmReceivedDttm=?, IsStripeEnabled=?, IsSquareEnabled=?,
-            Source=?, ScrapedAt=?
-        WHERE EventId=?
+            "ProviderNum"=%s, "ProviderNameFull"=%s, "ProviderEmailGeneric"=%s,
+            "RequestorName"=%s, "RequestorEmailAddress"=%s, "RequestorPhone"=%s,
+            "RequestorContactPref"=%s, "EventName"=%s, "EventType"=%s,
+            "AttendeeCount"=%s, "DatePossible1"=%s, "DateAvailable"=%s,
+            "DateAvailableType"=%s, "DateFlexible"=%s, "Duration"=%s,
+            "TimePossible1"=%s, "LeadStatus"=%s, "EmailSentDttm"=%s,
+            "DirectLead"=%s, "PurchasedLead"=%s, "BudgetValue"=%s,
+            "DirectLeadLocation"=%s, "InformationRequested"=%s, "ServicesRequested"=%s,
+            "FoodRequired"=%s, "VenueProvidesFood"=%s, "CatererProvidesFood"=%s,
+            "SelfProvidesFood"=%s, "IsFlagged"=%s, "IsRead"=%s, "IsEmailReguser"=%s,
+            "PhoneViewed"=%s, "PhoneViewedDttm"=%s, "EmailViewed"=%s, "EmailViewedDttm"=%s,
+            "ConfirmReceivedDttm"=%s, "IsStripeEnabled"=%s, "IsSquareEnabled"=%s,
+            "Source"=%s, "ScrapedAt"=%s
+        WHERE "EventId"=%s
     """, (
         d.get("ProviderNum"), d.get("ProviderNameFull"), d.get("ProviderEmailGeneric"),
         d.get("RequestorName"), d.get("RequestorEmailAddress"), d.get("RequestorPhone"),
@@ -419,16 +328,17 @@ def upsert_lead_details(con, event_id: str, d: dict):
     ))
 
 
-def upsert_activities(con, event_id: str, activities: list) -> int:
+def upsert_activities(cur, event_id: str, activities: list) -> int:
     inserted = 0
     for a in activities:
         try:
-            con.execute("""
-                INSERT OR IGNORE INTO eventective_lead_activities
-                (EventId, DateTime, DateTimeLong, ActivityTypeCd, Sender, Recipient,
-                 ResponseText, IsRead, ResponseNum, HasAttachments, IsAutoResponse,
-                 EventDocumentNum, EventPaymentNum, PaymentAmount, ReguserNum, ActionNum)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            cur.execute("""
+                INSERT INTO eventective_lead_activities
+                ("EventId", "DateTime", "DateTimeLong", "ActivityTypeCd", "Sender", "Recipient",
+                 "ResponseText", "IsRead", "ResponseNum", "HasAttachments", "IsAutoResponse",
+                 "EventDocumentNum", "EventPaymentNum", "PaymentAmount", "ReguserNum", "ActionNum")
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT ("EventId", "DateTime", "ActivityTypeCd", "ResponseNum") DO NOTHING
             """, (
                 event_id, a.get("DateTime"), a.get("DateTimeLong"), a.get("ActivityTypeCd"),
                 a.get("Sender"), a.get("Recipient"), a.get("ResponseText"), a.get("IsRead"),
@@ -436,7 +346,7 @@ def upsert_activities(con, event_id: str, activities: list) -> int:
                 a.get("EventDocumentNum"), a.get("EventPaymentNum"), a.get("PaymentAmount"),
                 a.get("ReguserNum"), a.get("ActionNum"),
             ))
-            inserted += con.execute("SELECT changes()").fetchone()[0]
+            inserted += cur.rowcount
         except Exception:
             pass
     return inserted
@@ -603,11 +513,12 @@ def build_lead_detail(l_row, ld_row, activities: list) -> dict:
     }
 
 
-def classify_change(event_id: str, signals: dict, con) -> str:
+def classify_change(event_id: str, signals: dict, cur) -> str:
     """Classify what changed: new_lead | replied_to_us | read_no_reply | updated"""
-    row = con.execute(
-        "SELECT DetailScrapedAt FROM eventective_leads WHERE EventId=?", (event_id,)
-    ).fetchone()
+    cur.execute(
+        'SELECT "DetailScrapedAt" FROM eventective_leads WHERE "EventId"=%s', (event_id,)
+    )
+    row = cur.fetchone()
     if not row or not row["DetailScrapedAt"]:
         return "new_lead"
     if signals["they_replied_to_us"]:
@@ -640,6 +551,7 @@ async def run_sync(limit: Optional[int] = None) -> dict:
 
     last_sync = get_meta("last_sync_time") or "2020-01-01T00:00:00"
     con = get_db()
+    cur = con.cursor(cursor_factory=RealDictCursor)
 
     needs_fetch = []   # list of (event_id, lead_dict)
     batches_checked = 0
@@ -673,10 +585,11 @@ async def run_sync(limit: Optional[int] = None) -> dict:
                 break
 
             # Check against DB
-            row = con.execute(
-                "SELECT LastActivityDttm, DetailScrapedAt FROM eventective_leads WHERE EventId=?",
+            cur.execute(
+                'SELECT "LastActivityDttm", "DetailScrapedAt" FROM eventective_leads WHERE "EventId"=%s',
                 (lead["EventId"],)
-            ).fetchone()
+            )
+            row = cur.fetchone()
 
             if row is None or not row["DetailScrapedAt"] or last_activity > (row["LastActivityDttm"] or ""):
                 needs_fetch.append(lead)
@@ -706,21 +619,22 @@ async def run_sync(limit: Optional[int] = None) -> dict:
         if not detail or isinstance(detail, dict) and "__error" in detail:
             continue
 
-        upsert_inbox_lead(con, lead)
-        upsert_lead_details(con, event_id, detail)
-        upsert_activities(con, event_id, detail.get("Activities") or [])
-        con.execute(
-            "UPDATE eventective_leads SET DetailScrapedAt=? WHERE EventId=?",
+        upsert_inbox_lead(cur, lead)
+        upsert_lead_details(cur, event_id, detail)
+        upsert_activities(cur, event_id, detail.get("Activities") or [])
+        cur.execute(
+            'UPDATE eventective_leads SET "DetailScrapedAt"=%s WHERE "EventId"=%s',
             (datetime.now(timezone.utc).isoformat(), event_id)
         )
         con.commit()
 
         # Re-read fresh activities
-        acts = [dict(r) for r in con.execute(
-            "SELECT * FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime", (event_id,)
-        ).fetchall()]
+        cur.execute(
+            'SELECT * FROM eventective_lead_activities WHERE "EventId"=%s ORDER BY "DateTime"', (event_id,)
+        )
+        acts = [dict(r) for r in cur.fetchall()]
         signals = classify_thread(acts)
-        change  = classify_change(event_id, signals, con)
+        change  = classify_change(event_id, signals, cur)
 
         event_date = detail.get("DatePossible1") or lead.get("EventDate")
         d_until    = days_until_event(event_date)
@@ -840,6 +754,7 @@ async def list_leads(
     offset: int = 0,
 ):
     con = get_db()
+    cur = con.cursor(cursor_factory=RealDictCursor)
     wheres = []
     params = []
 
@@ -850,15 +765,15 @@ async def list_leads(
         cutoff = datetime.fromtimestamp(
             datetime.now(timezone.utc).timestamp() - secs, tz=timezone.utc
         ).isoformat()
-        wheres.append("LastActivityDttm >= ?")
+        wheres.append('"LastActivityDttm" >= %s')
         params.append(cutoff)
 
     if venue:
-        wheres.append("LOWER(ProviderName) LIKE ?")
+        wheres.append('LOWER("ProviderName") LIKE %s')
         params.append(f"%{venue.lower()}%")
 
     if status:
-        wheres.append("LOWER(LeadStatus) = ?")
+        wheres.append('LOWER("LeadStatus") = %s')
         params.append(status.lower())
 
     if upcoming_days is not None:
@@ -866,22 +781,23 @@ async def list_leads(
         far_date    = datetime.fromtimestamp(
             datetime.now(timezone.utc).timestamp() + upcoming_days * 86400, tz=timezone.utc
         ).isoformat()
-        wheres.append("(DatePossible1 >= ? AND DatePossible1 <= ?)")
+        wheres.append('("DatePossible1" >= %s AND "DatePossible1" <= %s)')
         params.extend([cutoff_date, far_date])
 
     where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
 
-    rows = con.execute(f"""
-        SELECT EventId, PlannerName, LastActivityDttm, EventDate,
-               AttendeeCount, EventType, ProviderName, LeadStatus,
-               Source, EmailSentDttm,
-               RequestorName, RequestorPhone, RequestorEmailAddress,
-               BudgetValue, InformationRequested, DatePossible1, DateFlexible
+    cur.execute(f"""
+        SELECT "EventId", "PlannerName", "LastActivityDttm", "EventDate",
+               "AttendeeCount", "EventType", "ProviderName", "LeadStatus",
+               "Source", "EmailSentDttm",
+               "RequestorName", "RequestorPhone", "RequestorEmailAddress",
+               "BudgetValue", "InformationRequested", "DatePossible1", "DateFlexible"
         FROM eventective_leads
         {where_sql}
-        ORDER BY LastActivityDttm DESC
-        LIMIT ? OFFSET ?
-    """, params + [limit, offset]).fetchall()
+        ORDER BY "LastActivityDttm" DESC
+        LIMIT %s OFFSET %s
+    """, params + [limit, offset])
+    rows = cur.fetchall()
 
     leads_out = []
     for r in rows:
@@ -889,10 +805,11 @@ async def list_leads(
         d_until    = days_until_event(event_date)
 
         # Quick thread signals from DB
-        acts = con.execute(
-            "SELECT ActivityTypeCd, DateTime, ResponseText, Sender FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime",
+        cur.execute(
+            'SELECT "ActivityTypeCd", "DateTime", "ResponseText", "Sender" FROM eventective_lead_activities WHERE "EventId"=%s ORDER BY "DateTime"',
             (r["EventId"],)
-        ).fetchall()
+        )
+        acts = cur.fetchall()
         acts_dicts = [dict(a) for a in acts]
         signals    = classify_thread(acts_dicts)
         urg, _     = compute_urgency(d_until, signals["they_replied_to_us"], signals["hours_since_our_msg"])
@@ -930,16 +847,19 @@ async def list_leads(
 @router.get("/leads/{event_id}")
 async def get_lead(event_id: str):
     con = get_db()
+    cur = con.cursor(cursor_factory=RealDictCursor)
 
-    row = con.execute(
-        "SELECT * FROM eventective_leads WHERE EventId=?", (event_id,)
-    ).fetchone()
+    cur.execute(
+        'SELECT * FROM eventective_leads WHERE "EventId"=%s', (event_id,)
+    )
+    row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail=f"Lead {event_id} not found")
 
-    acts = [dict(a) for a in con.execute(
-        "SELECT * FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime", (event_id,)
-    ).fetchall()]
+    cur.execute(
+        'SELECT * FROM eventective_lead_activities WHERE "EventId"=%s ORDER BY "DateTime"', (event_id,)
+    )
+    acts = [dict(a) for a in cur.fetchall()]
 
     con.close()
     row_dict = dict(row)
@@ -1008,7 +928,8 @@ async def send_reply(event_id: str, req: ReplyRequest):
 
         # Update DB
         con = get_db()
-        upsert_activities(con, event_id, detail.get("Activities") or [])
+        cur = con.cursor(cursor_factory=RealDictCursor)
+        upsert_activities(cur, event_id, detail.get("Activities") or [])
         con.commit()
         con.close()
 
@@ -1023,7 +944,8 @@ async def send_reply(event_id: str, req: ReplyRequest):
 
 @router.get("/status")
 async def status():
-    con  = get_db()
+    con = get_db()
+    cur = con.cursor(cursor_factory=RealDictCursor)
     now  = datetime.now(timezone.utc)
 
     action_required = []
@@ -1031,29 +953,32 @@ async def status():
     upcoming        = []
 
     # Recent leads (last 30 days)
-    recent = con.execute("""
-        SELECT EventId, PlannerName, LastActivityDttm, EventDate,
-               AttendeeCount, EventType, ProviderName, LeadStatus, EmailSentDttm,
-               RequestorName, DatePossible1, BudgetValue
+    cur.execute("""
+        SELECT "EventId", "PlannerName", "LastActivityDttm", "EventDate",
+               "AttendeeCount", "EventType", "ProviderName", "LeadStatus", "EmailSentDttm",
+               "RequestorName", "DatePossible1", "BudgetValue"
         FROM eventective_leads
-        WHERE LastActivityDttm >= ?
-        ORDER BY LastActivityDttm DESC
-    """, ((datetime.fromtimestamp(now.timestamp() - 30*86400, tz=timezone.utc)).isoformat(),)).fetchall()
+        WHERE "LastActivityDttm" >= %s
+        ORDER BY "LastActivityDttm" DESC
+    """, ((datetime.fromtimestamp(now.timestamp() - 30*86400, tz=timezone.utc)).isoformat(),))
+    recent = cur.fetchall()
 
     leads_30d = 0
     response_times = []
     first_responder_count = 0
 
-    all_leads = con.execute("SELECT COUNT(*) as c FROM eventective_leads").fetchone()["c"]
+    cur.execute('SELECT COUNT(*) as c FROM eventective_leads')
+    all_leads = cur.fetchone()["c"]
 
     for r in recent:
         event_id   = r["EventId"]
         event_date = r["DatePossible1"] or r["EventDate"]
         d_until    = days_until_event(event_date)
 
-        acts = [dict(a) for a in con.execute(
-            "SELECT * FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime", (event_id,)
-        ).fetchall()]
+        cur.execute(
+            'SELECT * FROM eventective_lead_activities WHERE "EventId"=%s ORDER BY "DateTime"', (event_id,)
+        )
+        acts = [dict(a) for a in cur.fetchall()]
         signals = classify_thread(acts)
         urg, reasons = compute_urgency(d_until, signals["they_replied_to_us"], signals["hours_since_our_msg"])
 
@@ -1192,45 +1117,50 @@ async def api_notify_error(subject: str = "API Error", detail: str = ""):
 async def daily_report():
     """Generate and email a daily summary of all Eventective activity in the last 24 hours."""
     con = get_db()
+    cur = con.cursor(cursor_factory=RealDictCursor)
     now = datetime.now(timezone.utc)
     cutoff = datetime.fromtimestamp(now.timestamp() - 86400, tz=timezone.utc).isoformat()
 
     # New leads (received in last 24h)
-    new_leads = con.execute("""
-        SELECT EventId, RequestorName, PlannerName, ProviderName, EventType,
-               DatePossible1, EventDate, AttendeeCount, BudgetValue,
-               RequestorPhone, RequestorEmailAddress, InformationRequested,
-               EmailSentDttm
+    cur.execute("""
+        SELECT "EventId", "RequestorName", "PlannerName", "ProviderName", "EventType",
+               "DatePossible1", "EventDate", "AttendeeCount", "BudgetValue",
+               "RequestorPhone", "RequestorEmailAddress", "InformationRequested",
+               "EmailSentDttm"
         FROM eventective_leads
-        WHERE EmailSentDttm >= ?
-        ORDER BY EmailSentDttm DESC
-    """, (cutoff,)).fetchall()
+        WHERE "EmailSentDttm" >= %s
+        ORDER BY "EmailSentDttm" DESC
+    """, (cutoff,))
+    new_leads = cur.fetchall()
 
     # Leads with new activity in last 24h (excluding brand new ones)
     new_lead_ids = {r["EventId"] for r in new_leads}
-    active_leads = con.execute("""
-        SELECT DISTINCT el.EventId, el.RequestorName, el.PlannerName,
-               el.ProviderName, el.EventType, el.LastActivityDttm,
-               el.LeadStatus, el.DatePossible1, el.EventDate
+    cur.execute("""
+        SELECT DISTINCT el."EventId", el."RequestorName", el."PlannerName",
+               el."ProviderName", el."EventType", el."LastActivityDttm",
+               el."LeadStatus", el."DatePossible1", el."EventDate"
         FROM eventective_leads el
-        WHERE el.LastActivityDttm >= ?
-        ORDER BY el.LastActivityDttm DESC
-    """, (cutoff,)).fetchall()
+        WHERE el."LastActivityDttm" >= %s
+        ORDER BY el."LastActivityDttm" DESC
+    """, (cutoff,))
+    active_leads = cur.fetchall()
     active_leads = [r for r in active_leads if r["EventId"] not in new_lead_ids]
 
     # All activities in last 24h grouped by lead
-    recent_activities = con.execute("""
-        SELECT a.EventId, a.DateTime, a.ActivityTypeCd, a.Sender,
-               a.Recipient, a.ResponseText,
-               el.RequestorName, el.PlannerName, el.ProviderName
+    cur.execute("""
+        SELECT a."EventId", a."DateTime", a."ActivityTypeCd", a."Sender",
+               a."Recipient", a."ResponseText",
+               el."RequestorName", el."PlannerName", el."ProviderName"
         FROM eventective_lead_activities a
-        JOIN eventective_leads el ON el.EventId = a.EventId
-        WHERE a.DateTime >= ?
-        ORDER BY a.DateTime DESC
-    """, (cutoff,)).fetchall()
+        JOIN eventective_leads el ON el."EventId" = a."EventId"
+        WHERE a."DateTime" >= %s
+        ORDER BY a."DateTime" DESC
+    """, (cutoff,))
+    recent_activities = cur.fetchall()
 
     # Stats
-    total_leads_db = con.execute("SELECT COUNT(*) as c FROM eventective_leads").fetchone()["c"]
+    cur.execute('SELECT COUNT(*) as c FROM eventective_leads')
+    total_leads_db = cur.fetchone()["c"]
     last_sync = get_meta("last_sync_time")
     con.close()
 
@@ -1638,12 +1568,13 @@ async def _fub_export_lead(client: httpx.AsyncClient, lead: dict, mode: str):
     await _fub_create_note(client, fub_person_id, "\n".join(details_parts), subject="Eventective Lead Details")
 
     # Step 4 & 5: activities
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    activities = con.execute(
-        "SELECT * FROM eventective_lead_activities WHERE EventId=? ORDER BY DateTime ASC",
+    con = psycopg2.connect(DATABASE_URL)
+    cur = con.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        'SELECT * FROM eventective_lead_activities WHERE "EventId"=%s ORDER BY "DateTime" ASC',
         (event_id,)
-    ).fetchall()
+    )
+    activities = cur.fetchall()
     con.close()
 
     messages = []
@@ -1676,13 +1607,14 @@ async def _fub_export_lead(client: httpx.AsyncClient, lead: dict, mode: str):
 
     # Step 6: mark exported
     now_str = datetime.now(timezone.utc).isoformat()
-    con = sqlite3.connect(DB_PATH)
-    con.execute(
-        "UPDATE eventective_leads SET fub_exported=1, fub_exported_date=?, fub_people_id=? WHERE EventId=?",
+    con = psycopg2.connect(DATABASE_URL)
+    cur = con.cursor()
+    cur.execute(
+        'UPDATE eventective_leads SET fub_exported=1, fub_exported_date=%s, fub_people_id=%s WHERE "EventId"=%s',
         (now_str, str(fub_person_id), event_id)
     )
-    con.execute(
-        "UPDATE eventective_lead_activities SET fub_exported=1, fub_exported_date=?, fub_people_id=? WHERE EventId=?",
+    cur.execute(
+        'UPDATE eventective_lead_activities SET fub_exported=1, fub_exported_date=%s, fub_people_id=%s WHERE "EventId"=%s',
         (now_str, str(fub_person_id), event_id)
     )
     con.commit()
@@ -1693,26 +1625,28 @@ async def _fub_export_lead(client: httpx.AsyncClient, lead: dict, mode: str):
 
 async def _fub_export_new_activities(client: httpx.AsyncClient, state: dict):
     """Export only new (fub_exported=0) activities on already-exported leads."""
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    rows = con.execute(
-        """SELECT DISTINCT el.EventId, el.fub_people_id
+    con = psycopg2.connect(DATABASE_URL)
+    cur = con.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        """SELECT DISTINCT el."EventId", el.fub_people_id
            FROM eventective_leads el
-           JOIN eventective_lead_activities ela ON ela.EventId = el.EventId
+           JOIN eventective_lead_activities ela ON ela."EventId" = el."EventId"
            WHERE el.fub_exported=1 AND el.fub_people_id IS NOT NULL AND ela.fub_exported=0"""
-    ).fetchall()
+    )
+    rows = cur.fetchall()
     con.close()
 
     for row in rows:
         event_id = row["EventId"]
         fub_people_id = int(row["fub_people_id"])
         try:
-            con2 = sqlite3.connect(DB_PATH)
-            con2.row_factory = sqlite3.Row
-            activities = con2.execute(
-                "SELECT * FROM eventective_lead_activities WHERE EventId=? AND fub_exported=0 ORDER BY DateTime ASC",
+            con2 = psycopg2.connect(DATABASE_URL)
+            cur2 = con2.cursor(cursor_factory=RealDictCursor)
+            cur2.execute(
+                'SELECT * FROM eventective_lead_activities WHERE "EventId"=%s AND fub_exported=0 ORDER BY "DateTime" ASC',
                 (event_id,)
-            ).fetchall()
+            )
+            activities = cur2.fetchall()
             con2.close()
 
             messages = []
@@ -1739,9 +1673,10 @@ async def _fub_export_new_activities(client: httpx.AsyncClient, state: dict):
                 await _fub_create_note(client, fub_people_id, timeline_body, subject="Eventective Timeline")
 
             now_str = datetime.now(timezone.utc).isoformat()
-            con3 = sqlite3.connect(DB_PATH)
-            con3.execute(
-                "UPDATE eventective_lead_activities SET fub_exported=1, fub_exported_date=?, fub_people_id=? WHERE EventId=? AND fub_exported=0",
+            con3 = psycopg2.connect(DATABASE_URL)
+            cur3 = con3.cursor()
+            cur3.execute(
+                'UPDATE eventective_lead_activities SET fub_exported=1, fub_exported_date=%s, fub_people_id=%s WHERE "EventId"=%s AND fub_exported=0',
                 (now_str, str(fub_people_id), event_id)
             )
             con3.commit()
@@ -1768,11 +1703,12 @@ async def _fub_incremental_export():
 
     try:
         # Pass A — new leads (fub_exported=0)
-        con = sqlite3.connect(DB_PATH)
-        con.row_factory = sqlite3.Row
-        leads = con.execute(
-            "SELECT * FROM eventective_leads WHERE fub_exported=0 ORDER BY EmailSentDttm ASC"
-        ).fetchall()
+        con = psycopg2.connect(DATABASE_URL)
+        cur = con.cursor(cursor_factory=RealDictCursor)
+        cur.execute(
+            'SELECT * FROM eventective_leads WHERE fub_exported=0 ORDER BY "EmailSentDttm" ASC'
+        )
+        leads = cur.fetchall()
         con.close()
 
         state["progress"]["total"] = len(leads)
@@ -1814,13 +1750,14 @@ async def _fub_sync_task(mode: str, limit: int = 0, order: str = "asc"):
     tag = f"fub-sync-{order}"
 
     try:
-        con = sqlite3.connect(DB_PATH)
-        con.row_factory = sqlite3.Row
+        con = psycopg2.connect(DATABASE_URL)
+        cur = con.cursor(cursor_factory=RealDictCursor)
         direction = "DESC" if order == "desc" else "ASC"
-        query = f"SELECT * FROM eventective_leads WHERE fub_exported=0 ORDER BY EmailSentDttm {direction}"
+        query = f'SELECT * FROM eventective_leads WHERE fub_exported=0 ORDER BY "EmailSentDttm" {direction}'
         if limit > 0:
             query += f" LIMIT {limit}"
-        leads = con.execute(query).fetchall()
+        cur.execute(query)
+        leads = cur.fetchall()
         con.close()
 
         state["progress"]["total"] = len(leads)
@@ -1828,8 +1765,10 @@ async def _fub_sync_task(mode: str, limit: int = 0, order: str = "asc"):
         async with httpx.AsyncClient(timeout=30.0) as client:
             for lead in leads:
                 # Re-check fub_exported in case the other direction already got this lead
-                con2 = sqlite3.connect(DB_PATH)
-                already = con2.execute("SELECT fub_exported FROM eventective_leads WHERE EventId=?", (lead["EventId"],)).fetchone()
+                con2 = psycopg2.connect(DATABASE_URL)
+                cur2 = con2.cursor()
+                cur2.execute('SELECT fub_exported FROM eventective_leads WHERE "EventId"=%s', (lead["EventId"],))
+                already = cur2.fetchone()
                 con2.close()
                 if already and already[0] == 1:
                     state["progress"]["total"] -= 1

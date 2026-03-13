@@ -13,7 +13,7 @@ RUN playwright install chromium
 RUN apt-get update && apt-get install -y cron && rm -rf /var/lib/apt/lists/*
 
 # Copy app
-COPY api.py scrape_leads.py entrypoint.sh ./
+COPY api.py scrape_leads.py schema_pg.sql entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 # Daily report cron — 7 AM Central (12:00 UTC)
