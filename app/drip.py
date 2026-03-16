@@ -653,16 +653,6 @@ async def drip_post_sync_new_leads(event_ids: list[str]):
 
     for event_id in event_ids:
         try:
-            # Guard: only enroll if we haven't already replied to this lead
-            cur.execute(
-                """SELECT count(*) as cnt FROM eventective_lead_activities
-                   WHERE "EventId" = %s AND "ActivityTypeCd" = 'provplnr'""",
-                (event_id,),
-            )
-            if cur.fetchone()["cnt"] > 0:
-                log.info(f"Skipping Seq 1 for {event_id}: we already replied")
-                continue
-
             if not create_campaign(cur, event_id, "new_lead", immediate=True):
                 continue
             con.commit()
