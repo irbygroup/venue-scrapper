@@ -32,7 +32,9 @@ async def run_sync(limit: Optional[int] = None) -> dict:
         await bm.sync_page.goto(inbox_url(), wait_until="domcontentloaded")
         await bm.sync_page.wait_for_load_state("networkidle", timeout=15000)
 
-    last_sync = get_meta("last_sync_time") or "2020-01-01T00:00:00"
+    last_sync_raw = get_meta("last_sync_time") or "2020-01-01T00:00:00"
+    # Strip timezone offset for string comparison with naive Eventective timestamps
+    last_sync = last_sync_raw.replace("+00:00", "").replace("Z", "")
     con = get_db()
     cur = con.cursor(cursor_factory=RealDictCursor)
 
