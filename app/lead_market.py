@@ -44,19 +44,33 @@ async def _do_check_lead_market(bm, started_at) -> dict:
     await page.wait_for_load_state("networkidle", timeout=15000)
     await asyncio.sleep(random.uniform(1.5, 2.5))
 
-    # Dismiss the Lead Market help dialog if visible
-    try:
-        help_continue = page.locator('#sc-lead-market-help button.sc-dark-btn, dialog:has-text("Lead Market") button:has-text("Continue")')
-        if await help_continue.is_visible(timeout=1000):
-            await help_continue.click()
-            await asyncio.sleep(random.uniform(0.5, 1.0))
-    except Exception:
-        pass
-
     moved = []
     skipped = []
 
     print(f"Lead Market: page URL after nav = {page.url}")
+
+    # Wait for Angular to render lead rows (or confirm page is empty)
+    try:
+        await page.wait_for_selector("div.sc-table-row", timeout=8000)
+    except Exception:
+        # Might be a dialog blocking, or genuinely empty
+        pass
+
+    # Dismiss the Lead Market help/intro dialog if visible (Bootstrap modal)
+    try:
+        intro_dialog = page.locator("div.modal.show:has-text('Lead Market')")
+        if await intro_dialog.is_visible(timeout=1000):
+            cont_btn = intro_dialog.locator("button:has-text('Continue')")
+            if await cont_btn.is_visible(timeout=1000):
+                await cont_btn.click()
+                print("Lead Market: dismissed intro dialog")
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+    except Exception:
+        pass
+
+    # Debug: snapshot visible text to understand page state
+    page_text = await page.evaluate("document.body?.innerText?.substring(0, 500) || 'empty'")
+    print(f"Lead Market: page text preview = {page_text[:300]}")
 
     # Process leads one at a time — DOM changes after each move
     while True:
