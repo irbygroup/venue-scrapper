@@ -344,6 +344,9 @@ async def process_due_campaigns() -> dict:
     skipped = 0
     errors = 0
 
+    llm_failures = 0
+    LLM_FAIL_THRESHOLD = 3  # notify after this many consecutive LLM failures
+
     for campaign in due:
         event_id = campaign["EventId"]
         sequence = campaign["sequence"]
@@ -371,11 +374,16 @@ async def process_due_campaigns() -> dict:
             skipped += 1
             continue
 
-        # Check for pre-generated message (Seq 1)
+        # If LLM is down, skip remaining campaigns (they'll retry next run)
+        if llm_failures >= LLM_FAIL_THRESHOLD:
+            skipped += 1
+            continue
+
+        # Check for pre-generated or previously failed message to retry
         cur.execute(
-            """SELECT id, message FROM drip_messages
-               WHERE "EventId"=%s AND sequence=%s AND step=%s AND result='scheduled'
-               ORDER BY id LIMIT 1""",
+            """SELECT id, message, result FROM drip_messages
+               WHERE "EventId"=%s AND sequence=%s AND step=%s AND (result='scheduled' OR result LIKE 'failed:%%')
+               ORDER BY CASE WHEN result='scheduled' THEN 0 ELSE 1 END, id LIMIT 1""",
             (event_id, sequence, step),
         )
         pre_gen = cur.fetchone()
@@ -389,9 +397,18 @@ async def process_due_campaigns() -> dict:
             # Generate via LLM
             try:
                 result = await generate_reply_for_lead(event_id, sequence, step)
+                llm_failures = 0  # reset on success
             except Exception as e:
                 log.error(f"LLM generation failed for {event_id}: {e}")
                 errors += 1
+                llm_failures += 1
+                if llm_failures == LLM_FAIL_THRESHOLD:
+                    notify_error(
+                        "Drip LLM is down — skipping remaining campaigns",
+                        f"Failed {LLM_FAIL_THRESHOLD} consecutive LLM calls. "
+                        f"Last error: {e}\n\n"
+                        f"Campaigns will auto-retry on next drip/process run."
+                    )
                 continue
 
             next_step_val = result.get("next_step", "reply_now")
@@ -469,6 +486,7 @@ async def process_due_campaigns() -> dict:
         send_result = await send_batch(generated)
 
         # Advance campaigns for successfully sent messages
+        failed_sends = []
         for msg in generated:
             con2 = get_db()
             cur2 = con2.cursor(cursor_factory=RealDictCursor)
@@ -482,8 +500,16 @@ async def process_due_campaigns() -> dict:
                     (_now_iso(), _now_iso(), msg["event_id"]),
                 )
                 advance_campaign(cur2, msg["event_id"])
+            elif dm_row and dm_row["result"].startswith("failed"):
+                failed_sends.append(f"{msg['event_id']}: {dm_row['result'][:200]}")
             con2.commit()
             con2.close()
+
+        if failed_sends:
+            notify_error(
+                f"Drip send failed for {len(failed_sends)} message(s)",
+                "\n".join(failed_sends) + "\n\nMessages will auto-retry on next drip/process run."
+            )
 
     # Phase 3: Backfill Sequence 3
     backfilled = 0
