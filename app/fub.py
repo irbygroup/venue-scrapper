@@ -312,13 +312,14 @@ async def _fub_export_lead(client: httpx.AsyncClient, lead: dict, mode: str):
         timeline_body = f"[Eventective Timeline - {event_id}]\n" + "\n".join(timeline_lines)
         await _fub_create_note(client, fub_person_id, timeline_body, subject="Eventective Timeline")
 
-    # Step 6: mark exported
+    # Step 6: mark exported + set local stage (webhook doesn't fire on initial creation)
     now_str = datetime.now(timezone.utc).isoformat()
+    stage = _fub_stage(lead, mode)
     con = psycopg2.connect(DATABASE_URL)
     cur = con.cursor()
     cur.execute(
-        'UPDATE eventective_leads SET fub_exported=1, fub_exported_date=%s, fub_people_id=%s WHERE "EventId"=%s',
-        (now_str, str(fub_person_id), event_id)
+        'UPDATE eventective_leads SET fub_exported=1, fub_exported_date=%s, fub_people_id=%s, fub_lead_stage=%s WHERE "EventId"=%s',
+        (now_str, str(fub_person_id), stage, event_id)
     )
     cur.execute(
         'UPDATE eventective_lead_activities SET fub_exported=1, fub_exported_date=%s, fub_people_id=%s WHERE "EventId"=%s',
