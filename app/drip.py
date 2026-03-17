@@ -284,20 +284,60 @@ async def send_batch(messages: list[dict]) -> dict:
                 log.info(f"Waiting {delay:.1f}s before next send...")
                 await asyncio.sleep(delay)
 
+            event_id = msg["event_id"]
+
+            # Re-sync lead from Eventective before sending to catch manual replies
             try:
-                reply_result = await _do_send_reply(msg["event_id"], msg["message_text"])
+                detail = await bm.fetch(f"/api/v1/salesandcatering/geteventdetails?id={event_id}")
+                if detail and not (isinstance(detail, dict) and "__error" in detail):
+                    from app.db import upsert_lead_details, upsert_activities
+                    con_sync = get_db()
+                    cur_sync = con_sync.cursor()
+                    upsert_lead_details(cur_sync, event_id, detail)
+                    upsert_activities(cur_sync, event_id, detail.get("Activities") or [])
+                    con_sync.commit()
+                    con_sync.close()
+            except Exception as e:
+                log.warning(f"Pre-send sync failed for {event_id} (sending anyway): {e}")
+
+            # Check if someone already replied manually since we generated
+            con_chk = get_db()
+            cur_chk = con_chk.cursor()
+            cur_chk.execute(
+                """SELECT count(*) as cnt FROM eventective_lead_activities
+                   WHERE "EventId" = %s AND "ActivityTypeCd" = 'provplnr'
+                   AND "DateTime" > (SELECT created_at FROM drip_campaigns WHERE "EventId" = %s)""",
+                (event_id, event_id),
+            )
+            manual_replies = cur_chk.fetchone()[0]
+            con_chk.close()
+
+            if manual_replies > 0:
+                log.info(f"Skipping drip for {event_id}: manual reply detected since enrollment")
+                con_upd = get_db()
+                cur_upd = con_upd.cursor()
+                cur_upd.execute(
+                    "UPDATE drip_messages SET sent_at=%s, result=%s WHERE id=%s",
+                    (_now_iso(), "skipped:manual_reply", msg["drip_message_id"]),
+                )
+                con_upd.commit()
+                con_upd.close()
+                continue
+
+            try:
+                reply_result = await _do_send_reply(event_id, msg["message_text"])
                 if reply_result.get("success"):
                     result = "success"
                     sent += 1
-                    log.info(f"Sent drip message to {msg['event_id']}")
+                    log.info(f"Sent drip message to {event_id}")
                 else:
                     result = f"failed:{reply_result.get('error', 'unknown')}"
                     failed += 1
-                    log.error(f"Send failed for {msg['event_id']}: {reply_result.get('error')}")
+                    log.error(f"Send failed for {event_id}: {reply_result.get('error')}")
             except Exception as e:
                 result = f"failed:{e}"
                 failed += 1
-                log.error(f"Send error for {msg['event_id']}: {e}")
+                log.error(f"Send error for {event_id}: {e}")
 
             # Update drip_messages row
             con = get_db()
