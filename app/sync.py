@@ -39,6 +39,7 @@ async def run_sync(limit: Optional[int] = None) -> dict:
     cur = con.cursor(cursor_factory=RealDictCursor)
 
     needs_fetch = []   # list of (event_id, lead_dict)
+    max_activity_seen = last_sync  # track highest LastActivityDttm we see
     batches_checked = 0
     total_scanned   = 0
     stop_reason     = "limit_reached"
@@ -63,6 +64,9 @@ async def run_sync(limit: Optional[int] = None) -> dict:
         for lead in batch:
             total_scanned += 1
             last_activity = lead.get("LastActivityDttm") or ""
+
+            if last_activity > max_activity_seen:
+                max_activity_seen = last_activity
 
             # Sorted DESC — first stale lead means everything below is stale
             if last_activity <= last_sync:
@@ -152,17 +156,30 @@ async def run_sync(limit: Optional[int] = None) -> dict:
 
         results[change].append(entry) if change in results else results["other_updates"].append(entry)
 
-    set_meta("last_sync_time", started_at.isoformat())
+    set_meta("last_sync_time", max_activity_seen)
     con.close()
 
     # Auto-export new leads and activities to FUB
     if needs_fetch:
         asyncio.create_task(_fub_incremental_export())
 
-    # Drip campaign hooks — enroll all synced leads (create_campaign skips duplicates)
+    # Drip campaign hooks
     try:
         from app.drip import drip_post_sync_new_leads, drip_post_sync_replies
+        # Enroll all synced leads that had changes
         all_synced_ids = [e["event_id"] for cat in ("new_leads", "read_no_reply", "other_updates") for e in results[cat]]
+        # Also find recent leads with no drip campaign (catches no_change leads)
+        con2 = get_db()
+        cur2 = con2.cursor(cursor_factory=RealDictCursor)
+        cur2.execute(
+            """SELECT el."EventId" FROM eventective_leads el
+               LEFT JOIN drip_campaigns dc ON dc."EventId" = el."EventId"
+               WHERE dc."EventId" IS NULL
+               AND el."EmailSentDttm" >= (NOW() - INTERVAL '14 days')::text"""
+        )
+        missing_drip = [r["EventId"] for r in cur2.fetchall()]
+        con2.close()
+        all_synced_ids = list(set(all_synced_ids + missing_drip))
         if all_synced_ids:
             asyncio.create_task(drip_post_sync_new_leads(all_synced_ids))
         if results["replied_to_us"]:
