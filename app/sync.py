@@ -165,7 +165,24 @@ async def run_sync(limit: Optional[int] = None) -> dict:
 
     # Drip campaign hooks
     try:
-        from app.drip import drip_post_sync_new_leads, drip_post_sync_replies
+        from app.drip import drip_post_sync_new_leads, drip_post_sync_replies, _now_iso
+        # Cancel drip for deleted/lost/booked leads immediately
+        con_cancel = get_db()
+        cur_cancel = con_cancel.cursor()
+        cur_cancel.execute(
+            """UPDATE drip_campaigns SET status='cancelled', cancel_reason='lead_status_changed', updated_at=%s
+               WHERE status IN ('active', 'paused')
+               AND "EventId" IN (
+                   SELECT "EventId" FROM eventective_leads WHERE "LeadStatus" IN ('Deleted', 'Lost', 'Booked')
+               )""",
+            (_now_iso(),),
+        )
+        cancelled_drips = cur_cancel.rowcount
+        if cancelled_drips > 0:
+            con_cancel.commit()
+            print(f"[sync] Cancelled {cancelled_drips} drip campaign(s) for deleted/lost/booked leads")
+        con_cancel.close()
+
         # Enroll all synced leads that had changes
         all_synced_ids = [e["event_id"] for cat in ("new_leads", "read_no_reply", "other_updates") for e in results[cat]]
         # Also find recent leads with no drip campaign (catches no_change leads)
