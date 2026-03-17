@@ -59,6 +59,7 @@ async def run_sync(limit: Optional[int] = None) -> dict:
             break
 
         batches_checked += 1
+        print(f"[sync] batch {batches_checked}: {len(batch)} leads, first={batch[0].get('EventId') if batch else 'empty'}, last_sync={last_sync}")
 
         for lead in batch:
             total_scanned += 1
@@ -66,6 +67,7 @@ async def run_sync(limit: Optional[int] = None) -> dict:
 
             # Sorted DESC — first stale lead means everything below is stale
             if last_activity <= last_sync:
+                print(f"[sync] stale: {lead.get('EventId')} last_activity={last_activity} <= last_sync={last_sync}")
                 stop_reason = "reached_stale"
                 break
 
