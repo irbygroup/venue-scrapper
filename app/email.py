@@ -1,12 +1,12 @@
 from datetime import datetime, timezone
 
 from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail, Email, To, HtmlContent
+from sendgrid.helpers.mail import Mail, Email, To, Cc, HtmlContent
 
 from app.config import get_config
 
 
-def send_email(subject: str, html_body: str) -> dict:
+def send_email(subject: str, html_body: str, cc: bool = False) -> dict:
     """Send an email via SendGrid using config table values."""
     api_key = get_config("sendgrid_api_key")
     if not api_key:
@@ -17,6 +17,11 @@ def send_email(subject: str, html_body: str) -> dict:
     to_email = To(get_config("email_to", "jared@irbygroup.com"))
     message = Mail(from_email=from_email, to_emails=to_email,
                    subject=subject, html_content=HtmlContent(html_body))
+
+    if cc:
+        cc_email = get_config("email_cc")
+        if cc_email:
+            message.add_cc(Cc(cc_email))
 
     try:
         sg = SendGridAPIClient(api_key)
@@ -34,4 +39,4 @@ def notify_error(subject: str, detail: str):
     <p><strong>Error:</strong></p>
     <pre style="background:#f8f8f8;padding:12px;border-radius:4px;">{detail}</pre>
     """
-    send_email(f"[Venue Scrapper] {subject}", html)
+    send_email(f"[Venue Scrapper] {subject}", html, cc=True)
