@@ -6,7 +6,7 @@ from sendgrid.helpers.mail import Mail, Email, To, Cc, HtmlContent
 from app.config import get_config
 
 
-def send_email(subject: str, html_body: str, cc: bool = False) -> dict:
+def send_email(subject: str, html_body: str, cc: bool = False, to: str = None, cc_addr: str = None) -> dict:
     """Send an email via SendGrid using config table values."""
     api_key = get_config("sendgrid_api_key")
     if not api_key:
@@ -14,11 +14,13 @@ def send_email(subject: str, html_body: str, cc: bool = False) -> dict:
 
     from_email = Email(get_config("email_from", "it@irbygroup.com"),
                        get_config("email_from_name", "Venue Scrapper"))
-    to_email = To(get_config("email_to", "jared@irbygroup.com"))
+    to_email = To(to or get_config("email_to", "jared@irbygroup.com"))
     message = Mail(from_email=from_email, to_emails=to_email,
                    subject=subject, html_content=HtmlContent(html_body))
 
-    if cc:
+    if cc_addr:
+        message.add_cc(Cc(cc_addr))
+    elif cc:
         cc_email = get_config("email_cc")
         if cc_email:
             message.add_cc(Cc(cc_email))

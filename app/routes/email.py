@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter
 from psycopg2.extras import RealDictCursor
 
+from app.config import get_config
 from app.db import get_db, get_meta
 from app.email import send_email
 
@@ -53,7 +54,7 @@ async def daily_report():
         SELECT "EventId", "RequestorName", "PlannerName", "ProviderName", "EventType",
                "DatePossible1", "EventDate", "AttendeeCount", "BudgetValue",
                "RequestorPhone", "RequestorEmailAddress", "InformationRequested",
-               "EmailSentDttm"
+               "EmailSentDttm", "PurchasedLead"
         FROM eventective_leads
         WHERE "EmailSentDttm" >= %s
         ORDER BY "EmailSentDttm" DESC
@@ -167,10 +168,14 @@ async def daily_report():
     # Summary counts
     our_replies = len([a for a in recent_activities if a["ActivityTypeCd"] == "provplnr"])
     their_replies = len([a for a in recent_activities if a["ActivityTypeCd"] == "plnrprov"])
+    direct_leads = len([l for l in new_leads if not l.get("PurchasedLead")])
+    market_leads = len([l for l in new_leads if l.get("PurchasedLead")])
     html_parts.append(f"""
     <table style="width:100%;border-collapse:collapse;margin:16px 0;">
         <tr style="background:#3498db;color:white;">
             <th style="padding:8px;text-align:center;">New Leads</th>
+            <th style="padding:8px;text-align:center;">Direct</th>
+            <th style="padding:8px;text-align:center;">Lead Market</th>
             <th style="padding:8px;text-align:center;">Active Leads</th>
             <th style="padding:8px;text-align:center;">Our Replies</th>
             <th style="padding:8px;text-align:center;">Their Replies</th>
@@ -178,6 +183,8 @@ async def daily_report():
         </tr>
         <tr style="text-align:center;font-size:24px;font-weight:bold;">
             <td style="padding:12px;">{len(new_leads)}</td>
+            <td style="padding:12px;">{direct_leads}</td>
+            <td style="padding:12px;">{market_leads}</td>
             <td style="padding:12px;">{len(active_leads)}</td>
             <td style="padding:12px;">{our_replies}</td>
             <td style="padding:12px;">{their_replies}</td>
@@ -360,7 +367,9 @@ async def daily_report():
     # Send it
     result = send_email(
         f"Eventective Daily Report — {now.strftime('%b %d, %Y')}",
-        html_body
+        html_body,
+        to=get_config("daily_report_to", "info@rentyellowhammer.com"),
+        cc_addr=get_config("daily_report_cc", "jared@irbygroup.com"),
     )
 
     return {
