@@ -702,6 +702,32 @@ async def drip_post_sync_new_leads(event_ids: list[str]):
             con.commit()
             log.info(f"Pre-generated 4 Seq 1 messages for {event_id}")
 
+            # Send step 0 immediately
+            if _cfg("drip_auto_send", "false") == "true" and results[0].get("next_step") != "skip":
+                step0_msg = cur.execute(
+                    """SELECT id, message FROM drip_messages
+                       WHERE "EventId"=%s AND sequence='new_lead' AND step=0 AND result='scheduled'
+                       ORDER BY id LIMIT 1""",
+                    (event_id,),
+                )
+                step0 = cur.fetchone()
+                if step0:
+                    send_result = await send_batch([{
+                        "event_id": event_id,
+                        "message_text": step0["message"],
+                        "drip_message_id": step0["id"],
+                        "sequence": "new_lead",
+                    }])
+                    if send_result["sent"] > 0:
+                        cur.execute(
+                            """UPDATE drip_campaigns SET last_outbound_at=%s, updated_at=%s
+                               WHERE "EventId"=%s""",
+                            (_now_iso(), _now_iso(), event_id),
+                        )
+                        advance_campaign(cur, event_id)
+                        con.commit()
+                        log.info(f"Sent immediate step 0 for {event_id}")
+
         except Exception as e:
             log.error(f"Failed to create drip for new lead {event_id}: {e}")
             con.rollback()
