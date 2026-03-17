@@ -72,6 +72,32 @@ Each lead in the result arrays contains:
 }
 ```
 
+## Lead Market
+
+### `POST /eventective/check-lead-market`
+
+Check the Eventective Lead Market for free leads and move them to the inbox via DOM interaction (mimics real user). After moving leads, triggers an immediate sync so the standard pipeline (FUB export + drip enrollment) handles them. Runs automatically via cron at :22 and :52 past each active hour.
+
+Uses `reply_lock` — returns 409 if a reply or drip send is in progress.
+
+**Response:**
+```json
+{
+  "duration_seconds": 12.3,
+  "leads_moved": 2,
+  "leads_skipped": 0,
+  "moved": [
+    {"summary": "Sat, Jul 11, 2026 | Free | Theadia - Mobile, AL 36602, Reunion, 100 Guests | The Hallet-Irby House, Budget: Flexible, Email & Phone provided", "raw_parts": ["..."]}
+  ],
+  "skipped": [],
+  "sync_triggered": true,
+  "sync_new_leads": 2
+}
+```
+
+**Errors:**
+- `409` — Reply page in use (reply or drip send in progress)
+
 ## Leads
 
 ### `GET /eventective/leads`

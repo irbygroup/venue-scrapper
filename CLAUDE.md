@@ -51,11 +51,13 @@ app/
   utils.py              # days_until_event, classify_thread, compute_urgency, etc.
   email.py              # send_email, notify_error
   sync.py               # run_sync()
+  lead_market.py        # run_check_lead_market() — claim free leads from Lead Market
   models.py             # LoginRequest, ReplyRequest
   fub.py                # All FUB logic (_fub_*, ACTIVITY_LABELS, fub_sync_state)
   routes/
     auth.py             # POST /auth/login, GET /auth/status
     sync.py             # POST /sync
+    lead_market.py      # POST /check-lead-market
     leads.py            # GET /leads, GET /leads/{id}, POST /leads/{id}/reply
     status.py           # GET /status
     email.py            # POST /notify_error, GET /daily_report
@@ -182,6 +184,7 @@ Before sending any drip message, checks `fub_lead_stage`:
 
 | Schedule | Endpoint | Purpose |
 |----------|----------|---------|
+| `:22/:52` every 2h, 8am-6pm | `POST /check-lead-market` | Claim free leads from Lead Market + trigger sync |
 | `:32` every 2h, 8am-6pm | `POST /sync` | Sync new leads from Eventective |
 | `:42` every 2h, 8am-6pm | `POST /drip/process` | Process due campaigns (10 min after sync) |
 | `7:00am` daily | `GET /daily_report` | Email daily summary |
