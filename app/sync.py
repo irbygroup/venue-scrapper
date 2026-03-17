@@ -159,13 +159,12 @@ async def run_sync(limit: Optional[int] = None) -> dict:
     if needs_fetch:
         asyncio.create_task(_fub_incremental_export())
 
-    # Drip campaign hooks
+    # Drip campaign hooks — enroll all synced leads (create_campaign skips duplicates)
     try:
         from app.drip import drip_post_sync_new_leads, drip_post_sync_replies
-        if results["new_leads"]:
-            asyncio.create_task(drip_post_sync_new_leads(
-                [e["event_id"] for e in results["new_leads"]]
-            ))
+        all_synced_ids = [e["event_id"] for cat in ("new_leads", "read_no_reply", "other_updates") for e in results[cat]]
+        if all_synced_ids:
+            asyncio.create_task(drip_post_sync_new_leads(all_synced_ids))
         if results["replied_to_us"]:
             asyncio.create_task(drip_post_sync_replies(
                 [e["event_id"] for e in results["replied_to_us"]]
