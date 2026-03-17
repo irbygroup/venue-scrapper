@@ -38,61 +38,61 @@ async def _do_check_lead_market(bm, started_at) -> dict:
         await page.wait_for_load_state("networkidle", timeout=15000)
         await asyncio.sleep(1)
 
-    # Click "Lead Market" nav link (mimic real user)
+    # Navigate to Lead Market by clicking nav link (mimic real user)
     lead_market_link = page.locator('a[href="#/crm/Event/LeadMarket"]').first
     await lead_market_link.click()
     await page.wait_for_load_state("networkidle", timeout=15000)
     await asyncio.sleep(random.uniform(1.5, 2.5))
 
-    moved = []
-    skipped = []
-
-    print(f"Lead Market: page URL after nav = {page.url}")
-
-    # Wait for Angular to render lead rows (or confirm page is empty)
+    # Wait for Angular to render lead rows (up to 10s)
     try:
-        await page.wait_for_selector("div.sc-table-row", timeout=8000)
+        await page.wait_for_selector("div.sc-table-row", timeout=10000)
     except Exception:
-        # Might be a dialog blocking, or genuinely empty
         pass
 
-    # Dismiss the Lead Market help/intro dialog if visible (Bootstrap modal)
+    # Dismiss Lead Market intro dialog if visible (shows on first visit)
     try:
-        intro_dialog = page.locator("div.modal.show:has-text('Lead Market')")
-        if await intro_dialog.is_visible(timeout=1000):
-            cont_btn = intro_dialog.locator("button:has-text('Continue')")
+        intro_modal = page.locator("div.modal.show:has-text('Lead Market')")
+        if await intro_modal.is_visible(timeout=1000):
+            cont_btn = intro_modal.locator("button:has-text('Continue')")
             if await cont_btn.is_visible(timeout=1000):
                 await cont_btn.click()
                 print("Lead Market: dismissed intro dialog")
-                await asyncio.sleep(random.uniform(1.0, 2.0))
+                await asyncio.sleep(random.uniform(1.5, 2.5))
+                # Re-wait for rows after dialog dismissal
+                try:
+                    await page.wait_for_selector("div.sc-table-row", timeout=10000)
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    # Debug: snapshot visible text to understand page state
-    page_text = await page.evaluate("document.body?.innerText?.substring(0, 500) || 'empty'")
-    print(f"Lead Market: page text preview = {page_text[:300]}")
+    moved = []
+    skipped = []
 
     # Process leads one at a time — DOM changes after each move
     while True:
-        rows = await page.query_selector_all("div.sc-table-row")
-        print(f"Lead Market: found {len(rows)} lead rows")
-        if not rows:
+        rows = page.locator("div.sc-table-row")
+        count = await rows.count()
+        print(f"Lead Market: {count} lead rows on page")
+        if count == 0:
             break
 
-        # Find the first free lead that hasn't been processed
+        # Find the first free lead
         found_free = False
-        for row in rows:
+        for i in range(count):
+            row = rows.nth(i)
             row_text = await row.text_content() or ""
 
             if "Free" not in row_text:
-                # Extract lead info for skip log
                 skipped.append(_extract_lead_info(row_text))
                 continue
 
             found_free = True
             lead_info = _extract_lead_info(row_text)
+            print(f"Lead Market: processing lead — {lead_info.get('summary', 'unknown')}")
 
-            # Click the row to select it
+            # Click the row to select it (human-like pause)
             await row.click()
             await asyncio.sleep(random.uniform(1.0, 2.0))
 
@@ -101,34 +101,37 @@ async def _do_check_lead_market(bm, started_at) -> dict:
             try:
                 await to_inbox_btn.wait_for(state="visible", timeout=5000)
             except Exception:
-                # Fallback: find by text
                 to_inbox_btn = page.locator("div.lead-details-action-btn", has_text="To Inbox")
                 await to_inbox_btn.wait_for(state="visible", timeout=5000)
 
             await asyncio.sleep(random.uniform(0.5, 1.0))
             await to_inbox_btn.click()
+            print("Lead Market: clicked 'To Inbox'")
             await asyncio.sleep(random.uniform(0.8, 1.5))
 
-            # Handle confirmation dialog
+            # Handle confirmation dialog "Move Lead to Inbox?"
             dialog = page.locator("#sc-confirm-lead-inbox")
             try:
                 await dialog.wait_for(state="visible", timeout=3000)
                 yes_btn = dialog.locator("button.sc-dark-btn")
                 await asyncio.sleep(random.uniform(0.3, 0.6))
                 await yes_btn.click()
-                await asyncio.sleep(random.uniform(1.0, 2.0))
+                print("Lead Market: clicked 'Yes' on confirmation dialog")
+                await asyncio.sleep(random.uniform(1.5, 2.5))
             except Exception:
-                # Dialog might not appear if "Don't show again" was checked
+                # Dialog might not appear if "Don't show again" was previously checked
+                print("Lead Market: confirmation dialog not shown (auto-confirmed)")
                 await asyncio.sleep(random.uniform(0.5, 1.0))
 
-            # Handle Purchase Lead Credit dialog (paid lead snuck through)
+            # Check if Purchase Lead Credit dialog appeared (paid lead)
             try:
-                purchase_dialog = page.locator("#sc-purchase-lead-credit, div:has(> h3:text('Purchase Lead Credit'))")
-                if await purchase_dialog.is_visible(timeout=500):
-                    close_btn = purchase_dialog.locator("button.btn-close, button:has-text('Clear')")
+                purchase_dialog = page.locator("div.modal.show:has-text('Purchase Lead Credit')")
+                if await purchase_dialog.is_visible(timeout=1000):
+                    close_btn = purchase_dialog.locator("button.btn-close").first
                     await close_btn.click()
                     await asyncio.sleep(0.5)
                     skipped.append({**lead_info, "reason": "requires_purchase"})
+                    print(f"Lead Market: skipped paid lead — {lead_info.get('summary', 'unknown')}")
                     continue
             except Exception:
                 pass
@@ -136,7 +139,7 @@ async def _do_check_lead_market(bm, started_at) -> dict:
             moved.append(lead_info)
             print(f"Lead Market: moved lead to inbox — {lead_info.get('summary', 'unknown')}")
 
-            # Wait for DOM to update (row removal)
+            # Wait for DOM to update (row removal animation)
             await asyncio.sleep(random.uniform(1.0, 1.5))
             break  # Re-query rows from the top
 
@@ -153,6 +156,7 @@ async def _do_check_lead_market(bm, started_at) -> dict:
                 sync_result = await run_sync()
 
     duration = (datetime.now(timezone.utc) - started_at).total_seconds()
+    print(f"Lead Market: done in {duration:.1f}s — {len(moved)} moved, {len(skipped)} skipped")
     return {
         "duration_seconds": round(duration, 1),
         "leads_moved": len(moved),
@@ -161,7 +165,6 @@ async def _do_check_lead_market(bm, started_at) -> dict:
         "skipped": skipped,
         "sync_triggered": sync_result is not None,
         "sync_new_leads": len(sync_result.get("new_leads", [])) if sync_result else 0,
-        "debug_url": page.url,
     }
 
 
