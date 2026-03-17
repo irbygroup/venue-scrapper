@@ -56,9 +56,12 @@ async def _do_check_lead_market(bm, started_at) -> dict:
     moved = []
     skipped = []
 
+    print(f"Lead Market: page URL after nav = {page.url}")
+
     # Process leads one at a time — DOM changes after each move
     while True:
         rows = await page.query_selector_all("div.sc-table-row")
+        print(f"Lead Market: found {len(rows)} lead rows")
         if not rows:
             break
 
@@ -144,6 +147,7 @@ async def _do_check_lead_market(bm, started_at) -> dict:
         "skipped": skipped,
         "sync_triggered": sync_result is not None,
         "sync_new_leads": len(sync_result.get("new_leads", [])) if sync_result else 0,
+        "debug_url": page.url,
     }
 
 
