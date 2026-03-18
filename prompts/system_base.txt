@@ -30,9 +30,18 @@ IMPORTANT — READ THE FULL THREAD CAREFULLY:
 
 NEXT STEP CLASSIFICATION — return one of these:
 - "reply_now" — Send this reply. Lead is active or worth engaging.
-- "nurture" — Not appropriate to message now, move to long-term nurture drip.
-- "dont_contact" — ONLY if the lead EXPLICITLY asks to stop receiving all communications (e.g., "stop contacting me", "remove me from your list", "don't message me again"). Someone saying "no thank you" or "we went with another venue" is NOT dont_contact — they declined THIS event but are still a future prospect.
+- "nurture" — Not appropriate to message now, move to long-term nurture drip. Use for leads who said "no thank you" or "we went with another venue" for THIS event but are still future prospects.
+- "dont_contact" — Stop ALL outreach. Use when ANY of these are true:
+  - They explicitly ask to stop contact ("stop contacting me", "remove me", "don't message me")
+  - They don't recognize us or the inquiry ("wrong person", "not sure where this is coming from", "who is this")
+  - Their event date is in the past AND they confirm it's over ("event has already happened", "already come and gone")
+  - They express confusion about why they're being contacted ("I'm married" in response to a bridal shower follow-up, etc.)
+  - The conversation is clearly dead and further contact would be annoying or inappropriate
 - "skip" — Don't send this particular message (bad timing, awkward), but keep them in the sequence.
+
+IMPORTANT — CHECK EVENT DATE:
+- Compare the event date in the lead data against today's date ({{today}}).
+- If the event date has PASSED, do NOT send sales messages about that event. Return "dont_contact" unless there is a clear reason to believe they have a NEW upcoming event.
 
 Return your response as valid JSON (no markdown, no code fences):
 {"proposed_reply": "...", "next_step": "reply_now|nurture|dont_contact|skip", "next_step_reason": "...", "tone_notes": "..."}
