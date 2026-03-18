@@ -136,6 +136,18 @@ def _parse_llm_response(content: str) -> dict:
 
     try:
         parsed = json.loads(content)
+    except json.JSONDecodeError:
+        # Models sometimes return JSON with raw newlines in string values — collapse and retry
+        if content.startswith("{"):
+            collapsed = " ".join(content.split())
+            try:
+                parsed = json.loads(collapsed)
+            except json.JSONDecodeError:
+                parsed = None
+        else:
+            parsed = None
+
+    if parsed is not None and isinstance(parsed, dict):
         # Guard against double-nested JSON — if proposed_reply is itself JSON, unwrap
         reply = parsed.get("proposed_reply", "")
         if isinstance(reply, str) and reply.startswith("{"):
@@ -154,15 +166,15 @@ def _parse_llm_response(content: str) -> dict:
             parsed["next_step_reason"] = "proposed_reply missing or not a string"
 
         return parsed
-    except json.JSONDecodeError:
-        # Fallback: plain text — but flag for review instead of auto-sending
-        log.warning(f"LLM returned non-JSON response, flagging for review: {content[:200]}")
-        return {
-            "proposed_reply": content,
-            "next_step": "skip",
-            "next_step_reason": "model returned plain text (non-JSON) — skipping to be safe",
-            "tone_notes": "",
-        }
+
+    # Fallback: plain text — but flag for review instead of auto-sending
+    log.warning(f"LLM returned non-JSON response, flagging for review: {content[:200]}")
+    return {
+        "proposed_reply": content,
+        "next_step": "skip",
+        "next_step_reason": "model returned plain text (non-JSON) — skipping to be safe",
+        "tone_notes": "",
+    }
 
 
 def _get_model_chain() -> list[str]:
