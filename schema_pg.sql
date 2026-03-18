@@ -158,9 +158,9 @@ INSERT INTO config (name, value) VALUES ('drip_seq2_daily_cap', '25') ON CONFLIC
 INSERT INTO config (name, value) VALUES ('drip_seq3_daily_cap', '25') ON CONFLICT DO NOTHING;
 INSERT INTO config (name, value) VALUES ('litellm_base_url', 'https://litellm.build365.app') ON CONFLICT DO NOTHING;
 INSERT INTO config (name, value) VALUES ('litellm_api_key', 'sk-W8WhFDtFrC8aqjZw7_Cxdg') ON CONFLICT DO NOTHING;
-INSERT INTO config (name, value) VALUES ('litellm_model', 'openrouter/nvidia/nemotron-3-super-120b-a12b:free') ON CONFLICT DO NOTHING;
-INSERT INTO config (name, value) VALUES ('litellm_fallback_1', 'openrouter/google/gemini-3-flash-preview') ON CONFLICT DO NOTHING;
-INSERT INTO config (name, value) VALUES ('litellm_fallback_2', 'openrouter/openai/gpt-5.4-nano') ON CONFLICT DO NOTHING;
+INSERT INTO config (name, value) VALUES ('litellm_model', 'openrouter/google/gemini-3-flash-preview') ON CONFLICT DO NOTHING;
+INSERT INTO config (name, value) VALUES ('litellm_fallback_1', 'openrouter/openai/gpt-5.4-mini') ON CONFLICT DO NOTHING;
+INSERT INTO config (name, value) VALUES ('litellm_fallback_2', 'openrouter/google/gemini-3.1-pro-preview') ON CONFLICT DO NOTHING;
 
 -- Migrations (idempotent)
 DO $$ BEGIN
