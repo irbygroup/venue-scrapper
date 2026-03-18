@@ -1,6 +1,7 @@
 """
 LLM reply generation via LiteLLM proxy.
 Loads prompts from flat files in prompts/ directory.
+Supports model fallback chain: primary → fallback_1 → fallback_2.
 """
 
 import json
@@ -164,14 +165,48 @@ def _parse_llm_response(content: str) -> dict:
         }
 
 
+def _get_model_chain() -> list[str]:
+    """
+    Return ordered list of models to try.
+    Config keys: litellm_model (primary), litellm_fallback_1, litellm_fallback_2.
+    """
+    primary = _cfg("litellm_model", "openrouter/google/gemini-2.5-flash")
+    chain = [primary]
+    for i in range(1, 10):
+        fb = _cfg(f"litellm_fallback_{i}")
+        if fb:
+            chain.append(fb)
+        else:
+            break
+    return chain
+
+
+async def _call_llm(client: httpx.AsyncClient, base_url: str, api_key: str,
+                     model: str, messages: list[dict]) -> dict:
+    """Make a single LLM API call. Returns raw response dict. Raises on failure."""
+    resp = await client.post(
+        f"{base_url}/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 400,
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def generate_reply_for_lead(event_id: str, sequence: str, step: int) -> dict:
     """
     Generate a single reply for a lead at a given sequence/step.
+    Tries each model in the fallback chain until one succeeds.
     Returns dict with: proposed_reply, next_step, next_step_reason, tone_notes, model
     """
     base_url = _cfg("litellm_base_url", "https://litellm.build365.app")
     api_key = _cfg("litellm_api_key")
-    model = _cfg("litellm_model", "openrouter/google/gemini-2.5-flash")
+    model_chain = _get_model_chain()
 
     lead_detail = _fetch_lead_detail(event_id)
     system_prompt = _build_system_prompt(sequence, step)
@@ -182,29 +217,41 @@ async def generate_reply_for_lead(event_id: str, sequence: str, step: int) -> di
         {"role": "user", "content": user_content},
     ]
 
+    last_error = None
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{base_url}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model,
-                "messages": messages,
-                "temperature": 0.7,
-                "max_tokens": 400,
-            },
-        )
-        resp.raise_for_status()
+        for i, model in enumerate(model_chain):
+            try:
+                label = "primary" if i == 0 else f"fallback_{i}"
+                log.info(f"Trying {label} model: {model} for {event_id}")
 
-    data = resp.json()
-    content = data["choices"][0]["message"]["content"]
-    result = _parse_llm_response(content)
-    result["model"] = model
+                data = await _call_llm(client, base_url, api_key, model, messages)
+                content = data["choices"][0]["message"]["content"]
+                result = _parse_llm_response(content)
+                result["model"] = model
 
-    log.info(
-        f"Generated reply for {event_id} ({sequence}/step_{step}): "
-        f"next_step={result.get('next_step')}"
+                if i > 0:
+                    log.warning(f"Used {label} model {model} for {event_id} (primary failed)")
+
+                log.info(
+                    f"Generated reply for {event_id} ({sequence}/step_{step}): "
+                    f"next_step={result.get('next_step')} model={model}"
+                )
+                return result
+
+            except Exception as e:
+                last_error = e
+                label = "primary" if i == 0 else f"fallback_{i}"
+                remaining = len(model_chain) - i - 1
+                log.warning(
+                    f"{label} model {model} failed for {event_id}: {e}"
+                    f"{f' — trying {remaining} more fallback(s)' if remaining else ' — no more fallbacks'}"
+                )
+
+    # All models exhausted
+    raise RuntimeError(
+        f"All {len(model_chain)} models failed for {event_id}. "
+        f"Chain: {model_chain}. Last error: {last_error}"
     )
-    return result
 
 
 async def generate_all_seq1(event_id: str) -> list[dict]:
