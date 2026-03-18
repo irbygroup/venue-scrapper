@@ -19,7 +19,7 @@ SALES RULES (you MUST follow these):
 CRITICAL — CHECK "IMPORTANT_last_exchange" FIRST:
 - The JSON context starts with "IMPORTANT_last_exchange" showing OUR_LAST_MESSAGE and THEIR_LAST_MESSAGE.
 - READ THESE BEFORE WRITING ANYTHING. Your reply MUST build on this context.
-- If we already sent a message covering the same ground you're about to write, return "skip" instead.
+- If we already sent a message covering the same ground you're about to write, set next_step to "skip" (do NOT put the word "skip" in proposed_reply — proposed_reply must always be a real message or empty string).
 - Do NOT send a message that repeats or closely paraphrases what we already said.
 - If OUR_LAST_MESSAGE already introduced {{agent_name}}, pushed for a call, and mentioned the venues, do NOT send another intro message — advance the conversation instead.
 

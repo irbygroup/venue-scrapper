@@ -144,13 +144,22 @@ def _parse_llm_response(content: str) -> dict:
                     parsed = inner
             except json.JSONDecodeError:
                 pass
+
+        # Ensure proposed_reply exists and is a string
+        if "proposed_reply" not in parsed or not isinstance(parsed.get("proposed_reply"), str):
+            log.warning(f"LLM JSON missing proposed_reply field: {content[:200]}")
+            parsed["proposed_reply"] = ""
+            parsed["next_step"] = "skip"
+            parsed["next_step_reason"] = "proposed_reply missing or not a string"
+
         return parsed
     except json.JSONDecodeError:
-        # Fallback: treat as plain text reply
+        # Fallback: plain text — but flag for review instead of auto-sending
+        log.warning(f"LLM returned non-JSON response, flagging for review: {content[:200]}")
         return {
             "proposed_reply": content,
-            "next_step": "reply_now",
-            "next_step_reason": "model returned plain text, defaulting to reply_now",
+            "next_step": "skip",
+            "next_step_reason": "model returned plain text (non-JSON) — skipping to be safe",
             "tone_notes": "",
         }
 

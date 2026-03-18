@@ -5,6 +5,7 @@ Drip campaign state machine, scheduler, and batch sending.
 import asyncio
 import logging
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -17,6 +18,81 @@ from app.email import notify_error
 from app.llm import generate_reply_for_lead, generate_all_seq1
 
 log = logging.getLogger("drip")
+
+
+# ── Message validation ────────────────────────────────────────────────────────
+
+MIN_MESSAGE_LENGTH = 50  # real drip messages are at least a few sentences
+
+# Control words that should never be sent as message text
+_CONTROL_WORDS = {"skip", "dont_contact", "nurture", "reply_now", ""}
+
+# Patterns that indicate LLM metadata/JSON leaked into the reply
+_JSON_LEAK_RE = re.compile(r'"(?:next_step|proposed_reply|tone_notes|next_step_reason)"\s*:')
+
+# Dollar amounts — sales rules prohibit quoting pricing
+_PRICING_RE = re.compile(r'\$\s*\d[\d,]*(?:\.\d{2})?')
+
+# LLM refusal phrases that should never reach a customer
+_REFUSAL_PHRASES = [
+    "as an ai", "as a language model", "i cannot generate", "i'm unable to",
+    "i am unable to", "i can't create", "i apologize, but i",
+    "i'm not able to", "i am not able to",
+]
+
+# Wrong staff name — old staff who should not be referenced
+_WRONG_NAMES_RE = re.compile(r'\bSharon\b', re.IGNORECASE)
+
+# XML/thinking tag leaks from chain-of-thought models
+_THINKING_LEAK_RE = re.compile(r'<(?:thinking|scratchpad|internal|reasoning)[>\s]', re.IGNORECASE)
+
+
+def validate_message(text: str) -> Optional[str]:
+    """
+    Validate a drip message before sending.
+    Returns None if OK, or a rejection reason string.
+    """
+    stripped = text.strip()
+    lower = stripped.lower()
+
+    # Control word used as message text
+    if lower in _CONTROL_WORDS:
+        return f"control_word:{lower}"
+
+    # Too short to be a real message
+    if len(stripped) < MIN_MESSAGE_LENGTH:
+        return f"too_short:{len(stripped)}_chars"
+
+    # JSON/metadata leaked into reply
+    if _JSON_LEAK_RE.search(stripped):
+        return "json_metadata_leak"
+
+    # Raw JSON object as message
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return "raw_json_object"
+
+    # Code fence leak
+    if stripped.startswith("```"):
+        return "code_fence_leak"
+
+    # LLM refusal phrase
+    for phrase in _REFUSAL_PHRASES:
+        if phrase in lower:
+            return f"llm_refusal:{phrase}"
+
+    # Pricing mention (sales rules: never quote pricing)
+    if _PRICING_RE.search(stripped):
+        return "pricing_mentioned"
+
+    # Wrong staff name
+    if _WRONG_NAMES_RE.search(stripped):
+        return "wrong_staff_name:sharon"
+
+    # Chain-of-thought / thinking tag leak
+    if _THINKING_LEAK_RE.search(stripped):
+        return "thinking_tag_leak"
+
+    return None
 
 # ── Sequence definitions ─────────────────────────────────────────────────────
 
@@ -286,6 +362,24 @@ async def send_batch(messages: list[dict]) -> dict:
 
             event_id = msg["event_id"]
 
+            # Validate message content before sending
+            rejection = validate_message(msg["message_text"])
+            if rejection:
+                log.warning(f"Blocked bad message for {event_id}: {rejection} — '{msg['message_text'][:100]}'")
+                con_guard = get_db()
+                cur_guard = con_guard.cursor()
+                cur_guard.execute(
+                    "UPDATE drip_messages SET sent_at=%s, result=%s WHERE id=%s",
+                    (_now_iso(), f"blocked:{rejection}", msg["drip_message_id"]),
+                )
+                con_guard.commit()
+                con_guard.close()
+                notify_error(
+                    f"Drip message blocked: {rejection}",
+                    f"EventId: {event_id}\nReason: {rejection}\n\nMessage text:\n{msg['message_text'][:500]}"
+                )
+                continue
+
             # Re-sync lead from Eventective before sending to catch manual replies
             try:
                 detail = await bm.fetch(f"/api/v1/salesandcatering/geteventdetails?id={event_id}")
@@ -421,7 +515,7 @@ async def process_due_campaigns() -> dict:
 
         # Check for pre-generated or previously failed message to retry
         cur.execute(
-            """SELECT id, message, result FROM drip_messages
+            """SELECT id, message, next_step, result FROM drip_messages
                WHERE "EventId"=%s AND sequence=%s AND step=%s AND (result='scheduled' OR result LIKE 'failed:%%')
                ORDER BY CASE WHEN result='scheduled' THEN 0 ELSE 1 END, id LIMIT 1""",
             (event_id, sequence, step),
@@ -429,10 +523,10 @@ async def process_due_campaigns() -> dict:
         pre_gen = cur.fetchone()
 
         if pre_gen:
-            # Use pre-generated message
+            # Use pre-generated message, but respect stored next_step
             msg_id = pre_gen["id"]
             message_text = pre_gen["message"]
-            next_step_val = "reply_now"
+            next_step_val = pre_gen.get("next_step") or "reply_now"
         else:
             # Generate via LLM
             try:
@@ -484,6 +578,15 @@ async def process_due_campaigns() -> dict:
                 continue
 
             message_text = result["proposed_reply"]
+
+            # Validate message content at generation time
+            gen_rejection = validate_message(message_text)
+            if gen_rejection:
+                log.warning(f"LLM generated bad message for {event_id}: {gen_rejection} — '{message_text[:100]}'")
+                advance_campaign(cur, event_id)
+                con.commit()
+                skipped += 1
+                continue
 
             # Store the generated message
             cur.execute(
@@ -727,16 +830,20 @@ async def drip_post_sync_new_leads(event_ids: list[str]):
             results = await generate_all_seq1(event_id)
             now = _now_iso()
             for step, result in enumerate(results):
+                ns = result.get("next_step", "reply_now")
+                reply_text = result.get("proposed_reply", "")
+                # If LLM returned skip or message fails validation, mark as skipped
+                is_skip = ns == "skip" or validate_message(reply_text) is not None
                 cur.execute(
                     """INSERT INTO drip_messages
                        ("EventId", sequence, step, message, next_step, next_step_reason,
                         tone_notes, model, result, created_at)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
-                        event_id, "new_lead", step, result["proposed_reply"],
+                        event_id, "new_lead", step, reply_text,
                         result.get("next_step"), result.get("next_step_reason"),
                         result.get("tone_notes"), result.get("model"),
-                        "scheduled", now,
+                        "skipped:pre_gen" if is_skip else "scheduled", now,
                     ),
                 )
             con.commit()
