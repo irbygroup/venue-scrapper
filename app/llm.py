@@ -193,18 +193,53 @@ def _get_model_chain() -> list[str]:
     return chain
 
 
+# JSON Schema for structured output — forces models to return valid JSON
+REPLY_SCHEMA = {
+    "name": "drip_reply",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "proposed_reply": {
+                "type": "string",
+                "description": "The message to send to the lead. Empty string if next_step is not reply_now.",
+            },
+            "next_step": {
+                "type": "string",
+                "enum": ["reply_now", "nurture", "dont_contact", "skip"],
+            },
+            "next_step_reason": {
+                "type": "string",
+                "description": "Brief explanation of why this next_step was chosen.",
+            },
+            "tone_notes": {
+                "type": "string",
+                "description": "Notes about the tone and approach used.",
+            },
+        },
+        "required": ["proposed_reply", "next_step", "next_step_reason", "tone_notes"],
+        "additionalProperties": False,
+    },
+}
+
+
 async def _call_llm(client: httpx.AsyncClient, base_url: str, api_key: str,
                      model: str, messages: list[dict]) -> dict:
     """Make a single LLM API call. Returns raw response dict. Raises on failure."""
+    body = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 400,
+        "response_format": {"type": "json_schema", "json_schema": REPLY_SCHEMA},
+        # Suppress reasoning/thinking tokens from appearing in the response
+        "reasoning": {"exclude": True},
+    }
+
     resp = await client.post(
         f"{base_url}/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 400,
-        },
+        json=body,
     )
     resp.raise_for_status()
     return resp.json()
