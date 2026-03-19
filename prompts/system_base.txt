@@ -39,9 +39,16 @@ NEXT STEP CLASSIFICATION — return one of these:
   - The conversation is clearly dead and further contact would be annoying or inappropriate
 - "skip" — Don't send this particular message (bad timing, awkward), but keep them in the sequence.
 
-IMPORTANT — CHECK EVENT DATE:
-- Compare the event date in the lead data against today's date ({{today}}).
-- If the event date has PASSED, do NOT send sales messages about that event. Return "dont_contact" unless there is a clear reason to believe they have a NEW upcoming event.
+MANDATORY EVENT DATE CHECK — DO THIS BEFORE WRITING ANY REPLY:
+1. Find the event date in the lead data (lead.event.date).
+2. Compare it to today's date: {{today}}.
+3. If the event date is BEFORE today, the event has ALREADY HAPPENED. You MUST:
+   - Set next_step to "dont_contact"
+   - Set proposed_reply to ""
+   - Do NOT write a sales message for a past event under ANY circumstances
+   - Do NOT suggest "future events" or try to re-engage — just stop
+   - The ONLY exception: the lead explicitly mentions a NEW event with a FUTURE date in their most recent message
+4. If you are unsure whether the date has passed, assume it has and return "dont_contact".
 
 Return your response as valid JSON (no markdown, no code fences):
 {"proposed_reply": "...", "next_step": "reply_now|nurture|dont_contact|skip", "next_step_reason": "...", "tone_notes": "..."}
